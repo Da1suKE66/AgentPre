@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "project_root": "..",
+  "seed": 20260714,
+  "assets": {
+    "object": {
+      "name": "microwave",
+      "source": "deterministic_fixture_replace_with_articraft_export",
+      "urdf": "assets/microwave/microwave.urdf",
+      "affordances": "assets/microwave/affordances.json",
+      "world_pose": {
+        "position": [0.4, 0.0, 0.5],
+        "orientation_wxyz": [1.0, 0.0, 0.0, 0.0]
+      },
+      "door_joint": "door_hinge",
+      "door_link": "microwave_door",
+      "handle_link": "handle",
+      "handle_frame": "handle_grasp"
+    },
+    "robot": {
+      "name": "franka_panda",
+      "urdf": "${AGENTPRE_CACHE_ROOT}/assets/franka_description/robots/panda_arm_hand.urdf",
+      "bootstrap_source": "/cache/liluchen/agentbench/conda_envs/agentbench/lib/python3.10/site-packages/isaacsim/extscache/isaacsim.asset.importer.urdf-2.3.10+106.4.0.lx64.r.cp310/data/urdf/robots/franka_description",
+      "asset_license": "Apache-2.0",
+      "world_pose": {
+        "position": [0.0, -0.55, 0.0],
+        "orientation_wxyz": [1.0, 0.0, 0.0, 0.0]
+      },
+      "end_effector_link": "panda_hand",
+      "end_effector_offset": {
+        "position": [0.0, 0.0, 0.1034],
+        "orientation_wxyz": [1.0, 0.0, 0.0, 0.0]
+      },
+      "arm_joint_names": [
+        "panda_joint1",
+        "panda_joint2",
+        "panda_joint3",
+        "panda_joint4",
+        "panda_joint5",
+        "panda_joint6",
+        "panda_joint7"
+      ],
+      "finger_joint_names": ["panda_finger_joint1", "panda_finger_joint2"],
+      "default_joint_positions": [-0.0036802, 0.0239017, 0.0036804, -2.3683236, -0.0001292, 2.3922248, 0.785492],
+      "open_gripper_width_m": 0.08,
+      "closed_gripper_width_m": 0.028
+    }
+  },
+  "task": {
+    "closed_angle_deg": 0.0,
+    "goal_angle_deg": 65.0,
+    "grasp_offset": {
+      "position": [0.0, -0.01, 0.0],
+      "orientation_wxyz": [0.0, 1.0, 0.0, 0.0]
+    },
+    "pregrasp_distance_m": 0.12,
+    "retreat_distance_m": 0.12,
+    "phases": {
+      "pregrasp": {"samples": 12},
+      "approach": {"samples": 12},
+      "close": {"samples": 8},
+      "actuate": {"samples": 80},
+      "retreat": {"samples": 12}
+    }
+  },
+  "affordance_generation": {
+    "width_margin_m": 0.01,
+    "max_gripper_width_m": 0.08,
+    "max_candidates": 6,
+    "primitive_radial_samples": 16
+  },
+  "ik": {
+    "optimizer": "lm",
+    "jacobian": "analytic",
+    "iterations": 40,
+    "step_size": 1.0,
+    "lambda_initial": 0.05,
+    "position_weight": 1.0,
+    "rotation_weight": 0.5,
+    "joint_limit_weight": 10.0,
+    "nominal_posture_weight": 0.0001,
+    "max_recovery_seeds": 4,
+    "recovery_noise_std": 0.08,
+    "joint_limit_tolerance_rad": 1e-7
+  },
+  "collision": {
+    "enabled": true,
+    "deterministic": true,
+    "broad_phase": "sap",
+    "margin_m": 0.003,
+    "allowed_contact_links": ["panda_leftfinger", "panda_rightfinger", "handle"],
+    "candidate_reach_min_m": 0.15,
+    "candidate_reach_max_m": 0.9
+  },
+  "simulation": {
+    "dt": 0.0166666667,
+    "physics_substeps": 4,
+    "gravity_m_s2": [0.0, 0.0, -9.81],
+    "solver": "xpbd",
+    "solver_iterations": 16,
+    "robot_pd": {
+      "arm_stiffness": 650.0,
+      "arm_damping": 100.0,
+      "finger_stiffness": 300.0,
+      "finger_damping": 40.0,
+      "arm_effort_limit": 80.0,
+      "finger_effort_limit": 20.0
+    },
+    "fixed_grasp_constraint": {
+      "enabled": true,
+      "activate_after_phase": "close"
+    }
+  },
+  "thresholds": {
+    "min_ik_success_rate": 0.95,
+    "position_error_m": 0.02,
+    "orientation_error_deg": 10.0,
+    "final_door_angle_deg": 3.0,
+    "grasp_position_drift_m": 0.015,
+    "grasp_orientation_drift_deg": 7.5,
+    "max_collision_frame_ratio": 0.0,
+    "max_joint_limit_violations": 0,
+    "max_joint_limit_violation_frame_ratio": 0.0,
+    "require_nan_free": true
+  },
+  "runtime": {
+    "device": "cpu",
+    "threads": 1
+  },
+  "output": {
+    "root": "${AGENTPRE_CACHE_ROOT}/outputs",
+    "write_rollout_jsonl": true,
+    "write_resolved_config": true
+  }
+}

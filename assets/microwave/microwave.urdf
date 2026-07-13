@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<!-- Deterministic test fixture. Replace this path in config with an Articraft export for real runs. -->
+<robot name="agentpre_microwave_fixture">
+  <link name="microwave_base">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="18.0"/>
+      <inertia ixx="0.4182" ixy="0" ixz="0" iyy="0.5286" iyz="0" izz="0.6396"/>
+    </inertial>
+    <visual>
+      <geometry><mesh filename="meshes/unit_cube.obj" scale="0.50 0.42 0.32"/></geometry>
+    </visual>
+    <collision>
+      <geometry><box size="0.50 0.42 0.32"/></geometry>
+    </collision>
+  </link>
+
+  <link name="microwave_door">
+    <inertial>
+      <origin xyz="0.25 0 0" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <inertia ixx="0.02280625" ixy="0" ixz="0" iyy="0.085" iyz="0" izz="0.06280625"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.25 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/unit_cube.obj" scale="0.50 0.035 0.30"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.25 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.50 0.035 0.30"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="door_hinge" type="revolute">
+    <parent link="microwave_base"/>
+    <child link="microwave_door"/>
+    <origin xyz="-0.25 -0.2275 0" rpy="0 0 0"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="0.0" upper="1.3962634016" effort="80" velocity="1.5"/>
+    <dynamics damping="0.8" friction="0.2"/>
+  </joint>
+
+  <link name="handle">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.4"/>
+      <inertia ixx="0.00165417" ixy="0" ixz="0" iyy="0.00163417" iyz="0" izz="0.00006167"/>
+    </inertial>
+    <visual>
+      <geometry><mesh filename="meshes/unit_cube.obj" scale="0.025 0.035 0.22"/></geometry>
+    </visual>
+    <collision>
+      <geometry><box size="0.025 0.035 0.22"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="handle_mount" type="fixed">
+    <parent link="microwave_door"/>
+    <child link="handle"/>
+    <origin xyz="0.43 -0.0525 0" rpy="0 0 0"/>
+  </joint>
+</robot>
+

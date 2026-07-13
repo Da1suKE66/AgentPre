@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "asset_name": "agentpre_microwave_fixture",
+  "asset_source": "deterministic_test_fixture_not_articraft",
+  "quaternion_order": "wxyz",
+  "frames": {
+    "handle_grasp": {
+      "link": "handle",
+      "position": [0.0, 0.0, 0.0],
+      "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "gripper_closing_axis": [1.0, 0.0, 0.0],
+      "approach_axis": [0.0, 1.0, 0.0],
+      "recommended_gripper_width_m": 0.04
+    }
+  }
+}

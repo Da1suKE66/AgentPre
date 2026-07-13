@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+dist/
+build/
+
+# Runtime data belongs under /cache/liluchen/agentpre on the remote host.
+outputs/*
+!outputs/README.md
+*.log
+*.npz
+*.usd
+*.usda
+*.usdc
+
+# Large downloaded robot assets are cached outside the repository.
+assets/franka/
+
