@@ -48,7 +48,7 @@ if git rev-parse --verify HEAD >/dev/null 2>&1; then
 fi
 
 # Runtime outputs, environments, and cache data are intentionally excluded.
-allowed_roots=(.gitignore README.md pyproject.toml requirements.lock assets configs scripts src tests reports)
+allowed_roots=(.gitignore README.md pyproject.toml requirements.lock assets configs scripts src tests outputs reports)
 tracked_paths=()
 for path in "${allowed_roots[@]}"; do
   if [[ -e "${path}" ]] || git ls-files --error-unmatch -- "${path}" >/dev/null 2>&1; then
@@ -63,7 +63,7 @@ GIT_INDEX_FILE="${INDEX_FILE}" git add -A -- "${tracked_paths[@]}"
 
 while IFS= read -r -d '' staged_path; do
   case "${staged_path}" in
-    .gitignore|README.md|pyproject.toml|requirements.lock|assets/*|configs/*|scripts/*|src/*|tests/*|reports/*)
+    .gitignore|README.md|pyproject.toml|requirements.lock|assets/*|configs/*|scripts/*|src/*|tests/*|outputs/*|reports/*)
       ;;
     *)
       echo "Refusing to commit non-allowlisted staged path: ${staged_path}" >&2
