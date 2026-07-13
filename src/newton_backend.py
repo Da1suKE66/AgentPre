@@ -309,6 +309,43 @@ def joint_limit_violations(
     return tuple(violations)
 
 
+def project_scalar_joint_limits(
+    joint_q: Sequence[float] | np.ndarray,
+    joint_limit_lower: Sequence[float] | np.ndarray,
+    joint_limit_upper: Sequence[float] | np.ndarray,
+    dof_to_coord: Sequence[int] | np.ndarray,
+) -> np.ndarray:
+    """Project scalar joint coordinates onto finite URDF hard limits.
+
+    Newton's floating-point optimizer can finish a few micro-radians outside a
+    limit even with a joint-limit objective.  Projection makes the hard
+    constraint exact; callers must still run fresh FK afterwards because a
+    projected pose can fail the Cartesian tolerance.
+    """
+
+    coordinates = np.asarray(joint_q, dtype=float)
+    lower = np.asarray(joint_limit_lower, dtype=float)
+    upper = np.asarray(joint_limit_upper, dtype=float)
+    mapping = np.asarray(dof_to_coord, dtype=np.int64)
+    if coordinates.ndim != 1:
+        raise ValueError("joint_q must be one-dimensional")
+    if lower.shape != upper.shape or lower.shape != mapping.shape:
+        raise ValueError("joint limits and dof_to_coord must have matching shapes")
+    if np.any(mapping < 0) or np.any(mapping >= len(coordinates)):
+        raise ValueError("dof_to_coord contains an out-of-range coordinate index")
+    projected = coordinates.copy()
+    if not np.isfinite(projected).all():
+        return projected
+    for dof_index, coord_index in enumerate(mapping):
+        value = projected[int(coord_index)]
+        if math.isfinite(float(lower[dof_index])):
+            value = max(value, float(lower[dof_index]))
+        if math.isfinite(float(upper[dof_index])):
+            value = min(value, float(upper[dof_index]))
+        projected[int(coord_index)] = value
+    return projected
+
+
 def validate_waypoint_solution(
     joint_q: Sequence[float] | np.ndarray,
     actual_position: Iterable[float],
@@ -812,6 +849,31 @@ class NewtonFrankaIKBackend:
         )
         return decompose_pose(world_tcp)
 
+    def forward_kinematics_tcp(
+        self, joint_q: Sequence[float] | np.ndarray
+    ) -> np.ndarray:
+        """Return ``T_world_tcp`` for a complete Newton coordinate vector.
+
+        This public wrapper keeps callers away from simulator body indices and
+        preserves the project's ``wxyz`` convention at the adapter boundary.
+        """
+
+        coordinates = np.asarray(joint_q, dtype=float)
+        if coordinates.shape != (self.model.joint_coord_count,):
+            raise ValueError(
+                "joint_q must match model.joint_coord_count: "
+                f"expected {(self.model.joint_coord_count,)}, got {coordinates.shape}"
+            )
+        position, orientation_wxyz = self._forward_kinematics_tcp(coordinates)
+        if not (np.isfinite(position).all() and np.isfinite(orientation_wxyz).all()):
+            return np.full((4, 4), math.nan, dtype=float)
+        return pose_matrix(position, orientation_wxyz)
+
+    def initial_tcp_transform(self) -> np.ndarray:
+        """Return the nominal TCP transform used to begin the first segment."""
+
+        return self.forward_kinematics_tcp(self.nominal_joint_q)
+
     def solve_waypoints(
         self,
         target_positions: Sequence[Sequence[float]],
@@ -874,6 +936,19 @@ class NewtonFrankaIKBackend:
             objective_cost = float(costs[0]) if len(costs) else math.nan
 
             if np.isfinite(candidate).all():
+                candidate = project_scalar_joint_limits(
+                    candidate,
+                    self._joint_limit_lower,
+                    self._joint_limit_upper,
+                    self.dof_to_coord,
+                )
+                # The exact feasible projection, not a small optimizer
+                # overshoot, becomes the warm start for the next waypoint.
+                working = wp.array(
+                    candidate.astype(np.float32, copy=False).reshape(1, -1),
+                    dtype=wp.float32,
+                    device=self.device,
+                )
                 actual_position, actual_wxyz = self._forward_kinematics_tcp(candidate)
                 if np.isfinite(actual_wxyz).all():
                     actual_xyzw = quaternion_wxyz_to_xyzw(actual_wxyz)

@@ -25,6 +25,9 @@ export TMPDIR="${CACHE_ROOT}/tmp"
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export CUDA_VISIBLE_DEVICES=""
+export PYTHONNOUSERSITE=1
+export PYTHONHASHSEED=0
+unset PYTHONHOME PYTHONPATH
 
 if [[ ! -x "${ENV_PATH}/bin/python" ]]; then
   "${CONDA_BIN}" create -y -p "${ENV_PATH}" python=3.11 pip
@@ -36,4 +39,3 @@ AGENTPRE_ROOT="${ROOT}" AGENTPRE_CACHE_ROOT="${CACHE_ROOT}" \
 
 echo "Environment ready: ${ENV_PATH}"
 echo "Cache root: ${CACHE_ROOT}"
-

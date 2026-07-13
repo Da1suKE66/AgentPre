@@ -173,9 +173,21 @@ class MetricsTests(unittest.TestCase):
         metrics = compute_metrics(**data)
         self.assertTrue(metrics["has_nan"])
         self.assertFalse(metrics["success"])
-        self.assertFalse(metrics["gates"]["nan_free"]["passed"])
+        self.assertFalse(metrics["gates"]["finite_free"]["passed"])
         self.assertEqual(metrics["ee_error_valid_frame_count"], 1)
         self.assertEqual(metrics["grasp_drift_valid_frame_count"], 1)
+        json.dumps(metrics, allow_nan=False)
+
+    def test_infinity_always_fails_required_finite_gate(self) -> None:
+        data = common_inputs(20)
+        data["achieved_gripper_world"][0, 0, 3] = np.inf
+        data["ik_success_flags"][0] = False
+        metrics = compute_metrics(**data)
+        self.assertEqual(metrics["ik_waypoint_success_rate"], 0.95)
+        self.assertFalse(metrics["has_nan"])
+        self.assertTrue(metrics["has_infinite"])
+        self.assertFalse(metrics["gates"]["finite_free"]["passed"])
+        self.assertFalse(metrics["success"])
         json.dumps(metrics, allow_nan=False)
 
     def test_all_thresholds_are_required_and_validated(self) -> None:
@@ -206,6 +218,23 @@ class MetricsTests(unittest.TestCase):
         with self.assertRaises(MetricsInputError) as raised:
             compute_metrics(**data)
         self.assertEqual(raised.exception.code, "JOINT_LIMIT_ORDER_INVALID")
+
+    def test_joint_limit_tolerance_is_explicit_and_reports_raw_overshoot(self) -> None:
+        data = common_inputs(2)
+        data["joint_q"][0, 0] = 1.0 + 5.0e-8
+        data["joint_q"][1, 0] = 1.0 + 2.0e-7
+        data["joint_limit_tolerance_rad"] = 1.0e-7
+        metrics = compute_metrics(**data)
+        self.assertEqual(metrics["joint_limit_violation_count"], 1)
+        self.assertEqual(metrics["joint_limit_violation_frame_count"], 1)
+        self.assertAlmostEqual(metrics["joint_limit_tolerance_rad"], 1.0e-7)
+        self.assertAlmostEqual(metrics["max_joint_limit_raw_overshoot_rad"], 2.0e-7)
+        self.assertFalse(metrics["success"])
+
+        data["joint_limit_tolerance_rad"] = -1.0
+        with self.assertRaises(MetricsInputError) as raised:
+            compute_metrics(**data)
+        self.assertEqual(raised.exception.code, "JOINT_LIMIT_TOLERANCE_INVALID")
 
 
 if __name__ == "__main__":

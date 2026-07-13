@@ -320,6 +320,7 @@ def compute_metrics(
     ik_success_flags: Any,
     target_door_angle_rad: float,
     thresholds: Mapping[str, Any] | MetricThresholds,
+    joint_limit_tolerance_rad: float = 0.0,
 ) -> dict[str, Any]:
     """Compute rollout metrics and configuration-driven acceptance gates.
 
@@ -375,6 +376,20 @@ def compute_metrics(
         raise MetricsInputError(
             "TARGET_DOOR_ANGLE_INVALID", "target_door_angle_rad must be finite"
         )
+    try:
+        joint_limit_tolerance = float(joint_limit_tolerance_rad)
+    except (TypeError, ValueError) as exc:
+        raise MetricsInputError(
+            "JOINT_LIMIT_TOLERANCE_INVALID",
+            "joint_limit_tolerance_rad must be numeric",
+            value=joint_limit_tolerance_rad,
+        ) from exc
+    if not math.isfinite(joint_limit_tolerance) or joint_limit_tolerance < 0.0:
+        raise MetricsInputError(
+            "JOINT_LIMIT_TOLERANCE_INVALID",
+            "joint_limit_tolerance_rad must be finite and non-negative",
+            value=joint_limit_tolerance_rad,
+        )
 
     numeric_arrays = (door, handle, target, achieved, q, lower, upper)
     has_nan = any(bool(np.isnan(array).any()) for array in numeric_arrays)
@@ -385,7 +400,10 @@ def compute_metrics(
         names, handle, target, achieved
     )
 
-    joint_violations = (q < lower) | (q > upper)
+    lower_overshoot = np.maximum(lower - q, 0.0)
+    upper_overshoot = np.maximum(q - upper, 0.0)
+    raw_joint_limit_overshoot = np.maximum(lower_overshoot, upper_overshoot)
+    joint_violations = raw_joint_limit_overshoot > joint_limit_tolerance
     joint_violation_frames = np.any(joint_violations, axis=1)
     joint_violation_count = int(np.count_nonzero(joint_violations))
     joint_violation_frame_count = int(np.count_nonzero(joint_violation_frames))
@@ -442,11 +460,14 @@ def compute_metrics(
         "max_handle_gripper_orientation_drift_deg": _at_most(
             max_grasp_orientation_drift, parsed_thresholds.grasp_orientation_drift_deg
         ),
-        "nan_free": {
-            "value": not has_nan,
+        "finite_free": {
+            "value": not (has_nan or has_infinite),
             "operator": "required_true" if parsed_thresholds.require_nan_free else "not_required",
             "threshold": parsed_thresholds.require_nan_free,
-            "passed": bool((not parsed_thresholds.require_nan_free) or (not has_nan)),
+            "passed": bool(
+                (not parsed_thresholds.require_nan_free)
+                or (not has_nan and not has_infinite)
+            ),
         },
     }
 
@@ -466,6 +487,10 @@ def compute_metrics(
         "joint_limit_violation_count": joint_violation_count,
         "joint_limit_violation_frame_count": joint_violation_frame_count,
         "joint_limit_violation_frame_ratio": joint_violation_frame_ratio,
+        "joint_limit_tolerance_rad": joint_limit_tolerance,
+        "max_joint_limit_raw_overshoot_rad": _finite_stat(
+            raw_joint_limit_overshoot, "max"
+        ),
         "collision_frame_count": collision_frame_count,
         "collision_frame_ratio": collision_frame_ratio,
         "final_door_angle_deg": final_door_angle_deg,

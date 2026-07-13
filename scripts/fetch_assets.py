@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import xml.etree.ElementTree as ET
 
 
 def sha256(path: Path) -> str:
@@ -17,6 +18,37 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def referenced_meshes(urdf: Path, package_root: Path) -> tuple[Path, ...]:
+    """Resolve every URDF mesh reference and fail on unsupported packages."""
+
+    try:
+        root = ET.parse(urdf).getroot()
+    except (ET.ParseError, OSError) as exc:
+        raise RuntimeError(f"cannot parse Franka URDF {urdf}: {exc}") from exc
+    resolved: set[Path] = set()
+    package_prefix = "package://franka_description/"
+    for element in root.findall(".//mesh"):
+        filename = (element.get("filename") or "").strip()
+        if not filename:
+            raise RuntimeError("Franka URDF contains a mesh without a filename")
+        if filename.startswith(package_prefix):
+            path = package_root / filename[len(package_prefix) :]
+        elif filename.startswith("package://"):
+            raise RuntimeError(f"unsupported package mesh reference: {filename}")
+        else:
+            path = urdf.parent / filename
+        resolved.add(path.resolve())
+    if not resolved:
+        raise RuntimeError(f"Franka URDF contains no mesh references: {urdf}")
+    missing = [str(path) for path in sorted(resolved) if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Franka asset tree is incomplete; missing referenced meshes: "
+            + ", ".join(missing)
+        )
+    return tuple(sorted(resolved))
 
 
 def main() -> int:
@@ -53,9 +85,7 @@ def main() -> int:
                 f"franka_description tree at {source}"
             )
         shutil.copytree(source, stable_path)
-    collision_probe = stable_path / "meshes" / "collision" / "link7.stl"
-    if not collision_probe.is_file():
-        raise FileNotFoundError(f"Franka collision mesh is missing: {collision_probe}")
+    mesh_paths = referenced_meshes(urdf, stable_path)
 
     manifest = {
         "asset": str(robot["name"]),
@@ -64,7 +94,14 @@ def main() -> int:
         "stable_path": str(stable_path),
         "urdf": str(urdf),
         "urdf_sha256": sha256(urdf),
-        "collision_probe": str(collision_probe),
+        "referenced_mesh_count": len(mesh_paths),
+        "referenced_meshes": [
+            {
+                "path": str(path),
+                "sha256": sha256(path),
+            }
+            for path in mesh_paths
+        ],
     }
     manifest_path = asset_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

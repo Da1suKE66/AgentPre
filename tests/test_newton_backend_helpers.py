@@ -19,6 +19,7 @@ from src.newton_backend import (
     newton_backend_available,
     quaternion_angle_rad_xyzw,
     quaternion_wxyz_to_xyzw,
+    project_scalar_joint_limits,
     quaternion_xyzw_to_wxyz,
     require_newton_backend,
     resolve_unique_label,
@@ -99,6 +100,19 @@ class ScalarLayoutTests(unittest.TestCase):
 
 
 class TrueValidationTests(unittest.TestCase):
+    def test_hard_limit_projection_uses_dof_to_coordinate_mapping(self) -> None:
+        projected = project_scalar_joint_limits(
+            joint_q=[9.0, -1.000006, 2.000004],
+            joint_limit_lower=[-1.0, -2.0],
+            joint_limit_upper=[1.0, 2.0],
+            dof_to_coord=[1, 2],
+        )
+        np.testing.assert_array_equal(projected, [9.0, -1.0, 2.0])
+        preserved_nan = project_scalar_joint_limits(
+            [math.nan], [-1.0], [1.0], [0]
+        )
+        self.assertTrue(math.isnan(float(preserved_nan[0])))
+
     def test_joint_limit_check_uses_dof_to_coord_map_and_explicit_tolerance(self) -> None:
         violations = joint_limit_violations(
             joint_q=[99.0, 1.12, -0.02],

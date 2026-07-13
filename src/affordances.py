@@ -59,7 +59,12 @@ class FailureReason:
 
 @dataclass(frozen=True, slots=True)
 class HandleFrame:
-    """One authored handle frame, relative to ``link_name``."""
+    """One authored handle frame, relative to ``link_name``.
+
+    The closing and approach axes are expressed in this handle frame, not in
+    the parent URDF link frame.  This makes their meaning invariant under a
+    non-identity ``quaternion_wxyz``.
+    """
 
     name: str
     link_name: str
@@ -229,7 +234,11 @@ class HandleGeometry:
 
 @dataclass(frozen=True, slots=True)
 class GraspCandidate:
-    """One handle-relative gripper target."""
+    """One handle-relative gripper target.
+
+    ``position`` and ``quaternion_wxyz`` place the candidate in
+    ``link_name``.  The closing and approach axes are candidate-local.
+    """
 
     candidate_id: str
     rank: int
@@ -1009,8 +1018,11 @@ def generate_handle_candidates_from_geometry(
                 link_name=geometry.link_name,
                 position=tuple(float(value) for value in geometry.aabb_center),  # type: ignore[arg-type]
                 quaternion_wxyz=tuple(float(value) for value in quaternion),  # type: ignore[arg-type]
-                gripper_closing_axis=tuple(float(value) for value in closing_axis),  # type: ignore[arg-type]
-                approach_axis=tuple(float(value) for value in approach_axis),  # type: ignore[arg-type]
+                # The quaternion already rotates the candidate frame onto the
+                # PCA axes.  Store axes in that candidate frame so downstream
+                # code applies the rotation exactly once.
+                gripper_closing_axis=(1.0, 0.0, 0.0),
+                approach_axis=(0.0, 0.0, 1.0),
                 gripper_width_m=float(width),
                 source="urdf_geometry_aabb_pca",
             )

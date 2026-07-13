@@ -94,6 +94,34 @@ def _positive_number(data: dict[str, Any], dotted: str, *, allow_zero: bool = Fa
     return value
 
 
+def _finite_number(data: dict[str, Any], dotted: str) -> float:
+    raw = _lookup(data, dotted)
+    if isinstance(raw, bool):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            f"{dotted} must be numeric, not boolean",
+            stage="config",
+            details={"field": dotted, "value": raw},
+        )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            f"{dotted} must be numeric",
+            stage="config",
+            details={"field": dotted, "value": raw},
+        ) from exc
+    if not math.isfinite(value):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            f"{dotted} must be finite",
+            stage="config",
+            details={"field": dotted, "value": raw},
+        )
+    return value
+
+
 def _positive_integer(data: dict[str, Any], dotted: str, *, allow_zero: bool = False) -> int:
     raw = _lookup(data, dotted)
     if not isinstance(raw, int) or isinstance(raw, bool):
@@ -103,7 +131,8 @@ def _positive_integer(data: dict[str, Any], dotted: str, *, allow_zero: bool = F
             stage="config",
             details={"field": dotted, "value": raw},
         )
-    if raw < 0 if allow_zero else raw <= 0:
+    invalid = raw < 0 if allow_zero else raw <= 0
+    if invalid:
         relation = "non-negative" if allow_zero else "positive"
         raise PipelineError(
             FailureCode.CONFIG_INVALID,
@@ -126,7 +155,10 @@ class ProjectConfig:
         return _lookup(self.data, dotted)
 
     def resolve_path(self, value: str | os.PathLike[str]) -> Path:
-        cache_default = self.project_root / ".agentpre-cache"
+        # This deployment intentionally keeps environments, downloaded assets,
+        # and bulky rollouts off the small /workspace filesystem.  The
+        # environment variable remains available for portable test overrides.
+        cache_default = Path("/cache/liluchen/agentpre")
         expanded = str(value).replace(
             "${AGENTPRE_CACHE_ROOT}",
             os.environ.get("AGENTPRE_CACHE_ROOT", str(cache_default)),
@@ -145,6 +177,22 @@ def validate_config(data: dict[str, Any]) -> None:
     if not isinstance(data, dict):
         raise PipelineError(FailureCode.CONFIG_INVALID, "config root must be an object", stage="config")
 
+    if data.get("schema_version") != 1:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "schema_version must be exactly 1",
+            stage="config",
+            details={"field": "schema_version", "value": data.get("schema_version")},
+        )
+    project_root = data.get("project_root")
+    if not isinstance(project_root, str) or not project_root.strip():
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "project_root must be a non-empty path string",
+            stage="config",
+            details={"field": "project_root", "value": project_root},
+        )
+
     required_strings = (
         "assets.object.name",
         "assets.object.urdf",
@@ -156,6 +204,13 @@ def validate_config(data: dict[str, Any]) -> None:
         "assets.robot.name",
         "assets.robot.urdf",
         "assets.robot.end_effector_link",
+        "collision.broad_phase",
+        "collision.scope",
+        "ik.optimizer",
+        "ik.jacobian",
+        "simulation.solver",
+        "simulation.robot_control.backend",
+        "simulation.fixed_grasp_constraint.activate_after_phase",
         "runtime.device",
         "output.root",
     )
@@ -194,6 +249,25 @@ def validate_config(data: dict[str, Any]) -> None:
     if len(set(arm_joint_names)) != len(arm_joint_names):
         raise PipelineError(FailureCode.CONFIG_INVALID, "robot arm joint names must be unique", stage="config")
 
+    finger_joint_names = _lookup(data, "assets.robot.finger_joint_names")
+    if (
+        not isinstance(finger_joint_names, list)
+        or len(finger_joint_names) != 2
+        or not all(isinstance(name, str) and name.strip() for name in finger_joint_names)
+        or len(set(finger_joint_names)) != 2
+    ):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "assets.robot.finger_joint_names must contain exactly two unique names",
+            stage="config",
+        )
+    if set(arm_joint_names) & set(finger_joint_names):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "arm and finger joint names must not overlap",
+            stage="config",
+        )
+
     for phase in PHASE_ORDER:
         count = _lookup(data, f"task.phases.{phase}.samples")
         if not isinstance(count, int) or isinstance(count, bool) or count < 1:
@@ -203,22 +277,35 @@ def validate_config(data: dict[str, Any]) -> None:
                 stage="config",
             )
 
-    _positive_number(data, "task.goal_angle_deg")
+    closed_angle_deg = _finite_number(data, "task.closed_angle_deg")
+    goal_angle_deg = _finite_number(data, "task.goal_angle_deg")
+    if math.isclose(goal_angle_deg, closed_angle_deg, abs_tol=1.0e-12, rel_tol=0.0):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "task.goal_angle_deg must differ from task.closed_angle_deg",
+            stage="config",
+            details={"closed_angle_deg": closed_angle_deg, "goal_angle_deg": goal_angle_deg},
+        )
     _positive_number(data, "task.pregrasp_distance_m", allow_zero=True)
     _positive_number(data, "task.retreat_distance_m", allow_zero=True)
     _positive_number(data, "simulation.dt")
     _positive_integer(data, "simulation.physics_substeps")
     _positive_integer(data, "simulation.solver_iterations")
     _positive_integer(data, "ik.iterations")
-    _positive_integer(data, "ik.max_recovery_seeds")
-    _positive_integer(data, "runtime.threads")
+    runtime_threads = _positive_integer(data, "runtime.threads")
+    if runtime_threads != 1:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "runtime.threads must be 1 for the deterministic CPU baseline",
+            stage="config",
+            details={"field": "runtime.threads", "value": runtime_threads},
+        )
     _positive_number(data, "ik.position_weight")
     _positive_number(data, "ik.rotation_weight")
     _positive_number(data, "ik.joint_limit_weight")
     _positive_number(data, "ik.nominal_posture_weight", allow_zero=True)
     _positive_number(data, "ik.step_size")
     _positive_number(data, "ik.lambda_initial")
-    _positive_number(data, "ik.recovery_noise_std", allow_zero=True)
     _positive_number(data, "ik.joint_limit_tolerance_rad", allow_zero=True)
     _positive_number(data, "affordance_generation.width_margin_m", allow_zero=True)
     _positive_number(data, "affordance_generation.max_gripper_width_m")
@@ -230,18 +317,30 @@ def validate_config(data: dict[str, Any]) -> None:
             "affordance_generation.primitive_radial_samples must be at least 4",
             stage="config",
         )
-    _positive_number(data, "assets.robot.open_gripper_width_m")
-    _positive_number(data, "assets.robot.closed_gripper_width_m")
+    open_width = _positive_number(data, "assets.robot.open_gripper_width_m")
+    closed_width = _positive_number(data, "assets.robot.closed_gripper_width_m")
+    if closed_width > open_width:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "closed gripper width must not exceed open gripper width",
+            stage="config",
+            details={"closed_width_m": closed_width, "open_width_m": open_width},
+        )
+    candidate_max_width = float(_lookup(data, "affordance_generation.max_gripper_width_m"))
+    if candidate_max_width > open_width:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "affordance max gripper width must not exceed the robot open width",
+            stage="config",
+            details={
+                "candidate_max_width_m": candidate_max_width,
+                "robot_open_width_m": open_width,
+            },
+        )
     _finite_vector(_lookup(data, "simulation.gravity_m_s2"), 3, "simulation.gravity_m_s2")
     for dotted in (
         "collision.margin_m",
         "collision.candidate_reach_min_m",
-        "simulation.robot_pd.arm_stiffness",
-        "simulation.robot_pd.arm_damping",
-        "simulation.robot_pd.finger_stiffness",
-        "simulation.robot_pd.finger_damping",
-        "simulation.robot_pd.arm_effort_limit",
-        "simulation.robot_pd.finger_effort_limit",
     ):
         _positive_number(data, dotted, allow_zero=dotted == "collision.margin_m")
     reach_max = _positive_number(data, "collision.candidate_reach_max_m")
@@ -264,13 +363,88 @@ def validate_config(data: dict[str, Any]) -> None:
     _positive_number(data, "thresholds.max_collision_frame_ratio", allow_zero=True)
     _positive_integer(data, "thresholds.max_joint_limit_violations", allow_zero=True)
     _positive_number(data, "thresholds.max_joint_limit_violation_frame_ratio", allow_zero=True)
-    if not isinstance(_lookup(data, "thresholds.require_nan_free"), bool):
+    boolean_fields = (
+        "collision.enabled",
+        "collision.deterministic",
+        "simulation.fixed_grasp_constraint.enabled",
+        "thresholds.require_nan_free",
+        "output.write_rollout_jsonl",
+        "output.write_resolved_config",
+    )
+    for dotted in boolean_fields:
+        if not isinstance(_lookup(data, dotted), bool):
+            raise PipelineError(
+                FailureCode.CONFIG_INVALID,
+                f"{dotted} must be boolean",
+                stage="config",
+                details={"field": dotted},
+            )
+
+    if str(_lookup(data, "ik.optimizer")).lower() != "lm":
         raise PipelineError(
             FailureCode.CONFIG_INVALID,
-            "thresholds.require_nan_free must be boolean",
+            "ik.optimizer must be 'lm' for the Newton first-stage adapter",
             stage="config",
         )
-    success_rate = float(_lookup(data, "thresholds.min_ik_success_rate"))
+    if str(_lookup(data, "ik.jacobian")).lower() != "analytic":
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "ik.jacobian must be 'analytic'",
+            stage="config",
+        )
+    if str(_lookup(data, "simulation.solver")).lower() != "xpbd":
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.solver must be 'xpbd'",
+            stage="config",
+        )
+    if str(_lookup(data, "simulation.robot_control.backend")).lower() != "kinematic_body_driver":
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.robot_control.backend must be 'kinematic_body_driver'",
+            stage="config",
+            details={
+                "field": "simulation.robot_control.backend",
+                "value": _lookup(data, "simulation.robot_control.backend"),
+            },
+        )
+    if str(_lookup(data, "collision.broad_phase")).lower() != "sap":
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "collision.broad_phase must be 'sap'",
+            stage="config",
+        )
+    if str(_lookup(data, "collision.scope")).lower() != "cross_asset_robot_object":
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "collision.scope must be 'cross_asset_robot_object' for the current audited backend",
+            stage="config",
+            details={
+                "field": "collision.scope",
+                "value": _lookup(data, "collision.scope"),
+            },
+        )
+    if _lookup(data, "simulation.fixed_grasp_constraint.activate_after_phase") != "close":
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "fixed grasp activation must occur after the close phase",
+            stage="config",
+        )
+
+    allowed_links = _lookup(data, "collision.allowed_contact_links")
+    if (
+        not isinstance(allowed_links, list)
+        or not allowed_links
+        or not all(isinstance(name, str) and name.strip() for name in allowed_links)
+        or len(set(allowed_links)) != len(allowed_links)
+    ):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "collision.allowed_contact_links must contain unique non-empty names",
+            stage="config",
+        )
+
+    success_rate = _finite_number(data, "thresholds.min_ik_success_rate")
     if not math.isfinite(success_rate) or not 0.0 <= success_rate <= 1.0:
         raise PipelineError(
             FailureCode.CONFIG_INVALID,

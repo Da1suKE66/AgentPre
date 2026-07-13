@@ -176,6 +176,25 @@ class AffordanceTests(unittest.TestCase):
             )
             rotation = quaternion_to_matrix(candidate.quaternion_wxyz)
             np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1.0e-12)
+            np.testing.assert_allclose(candidate.gripper_closing_axis, [1.0, 0.0, 0.0])
+            np.testing.assert_allclose(candidate.approach_axis, [0.0, 0.0, 1.0])
+            # Candidate-local axes must map onto distinct link-local PCA axes;
+            # this catches applying the generated quaternion twice.
+            closing_link = rotation @ np.asarray(candidate.gripper_closing_axis)
+            approach_link = rotation @ np.asarray(candidate.approach_axis)
+            self.assertAlmostEqual(abs(float(np.dot(closing_link, approach_link))), 0.0, places=12)
+            self.assertTrue(
+                any(
+                    np.allclose(abs(float(np.dot(closing_link, axis))), 1.0, atol=1.0e-12)
+                    for axis in resolution.geometry.principal_axes.T
+                )
+            )
+            self.assertTrue(
+                any(
+                    np.allclose(abs(float(np.dot(approach_link, axis))), 1.0, atol=1.0e-12)
+                    for axis in resolution.geometry.principal_axes.T
+                )
+            )
 
     def test_box_cylinder_and_sphere_geometry_apply_local_origins(self) -> None:
         cases = (

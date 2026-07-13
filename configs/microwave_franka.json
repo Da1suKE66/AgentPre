@@ -51,7 +51,7 @@
     "goal_angle_deg": 65.0,
     "grasp_offset": {
       "position": [0.0, -0.01, 0.0],
-      "orientation_wxyz": [0.0, 1.0, 0.0, 0.0]
+      "orientation_wxyz": [0.5, -0.5, -0.5, -0.5]
     },
     "pregrasp_distance_m": 0.12,
     "retreat_distance_m": 0.12,
@@ -79,12 +79,11 @@
     "rotation_weight": 0.5,
     "joint_limit_weight": 10.0,
     "nominal_posture_weight": 0.0001,
-    "max_recovery_seeds": 4,
-    "recovery_noise_std": 0.08,
     "joint_limit_tolerance_rad": 1e-7
   },
   "collision": {
     "enabled": true,
+    "scope": "cross_asset_robot_object",
     "deterministic": true,
     "broad_phase": "sap",
     "margin_m": 0.003,
@@ -94,17 +93,12 @@
   },
   "simulation": {
     "dt": 0.0166666667,
-    "physics_substeps": 4,
+    "physics_substeps": 32,
     "gravity_m_s2": [0.0, 0.0, -9.81],
     "solver": "xpbd",
-    "solver_iterations": 16,
-    "robot_pd": {
-      "arm_stiffness": 650.0,
-      "arm_damping": 100.0,
-      "finger_stiffness": 300.0,
-      "finger_damping": 40.0,
-      "arm_effort_limit": 80.0,
-      "finger_effort_limit": 20.0
+    "solver_iterations": 64,
+    "robot_control": {
+      "backend": "kinematic_body_driver"
     },
     "fixed_grasp_constraint": {
       "enabled": true,
