@@ -26,6 +26,11 @@ DAEMON_LOCK="${LOCK_DIR}/github-sync-daemon.lock"
 CONTROL_LOCK="${LOCK_DIR}/github-sync-daemon-control.lock"
 LOG_FILE="${LOG_DIR}/github-sync-daemon.log"
 
+# EXIT traps run after run_daemon() has returned, when that function's local
+# variables are already out of scope.  Keep the final sync status at script
+# scope so cleanup can always publish a stopped heartbeat under `set -u`.
+DAEMON_LAST_EXIT_CODE="not_run"
+
 usage() {
   cat <<'EOF'
 Usage: sync_daemon.sh {start|run|status|stop}
@@ -150,7 +155,6 @@ run_daemon() {
   local sync_pid=""
   local wait_pid=""
   local stop_requested=0
-  local last_exit_code="not_run"
   local next_sync_epoch=0
 
   command -v flock >/dev/null 2>&1 \
@@ -187,7 +191,7 @@ run_daemon() {
   cleanup() {
     local recorded_pid
     recorded_pid="$(read_pid)"
-    write_heartbeat "stopped" "${last_exit_code}" 0 || true
+    write_heartbeat "stopped" "${DAEMON_LAST_EXIT_CODE}" 0 || true
     if [[ "${recorded_pid}" == "$$" ]]; then
       rm -f "${PID_FILE}"
     fi
@@ -195,20 +199,20 @@ run_daemon() {
 
   trap request_stop TERM INT HUP
   trap cleanup EXIT
-  write_heartbeat "starting" "${last_exit_code}" 0
+  write_heartbeat "starting" "${DAEMON_LAST_EXIT_CODE}" 0
 
   while (( stop_requested == 0 )); do
-    write_heartbeat "syncing" "${last_exit_code}" 0
+    write_heartbeat "syncing" "${DAEMON_LAST_EXIT_CODE}" 0
     echo "sync_attempt_started timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) daemon_pid=$$"
     "${SYNC_SCRIPT}" &
     sync_pid=$!
     if wait "${sync_pid}"; then
-      last_exit_code=0
+      DAEMON_LAST_EXIT_CODE=0
     else
-      last_exit_code=$?
+      DAEMON_LAST_EXIT_CODE=$?
     fi
     sync_pid=""
-    echo "sync_attempt_finished timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) exit_code=${last_exit_code} daemon_pid=$$"
+    echo "sync_attempt_finished timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ) exit_code=${DAEMON_LAST_EXIT_CODE} daemon_pid=$$"
     (( stop_requested == 0 )) || break
 
     next_sync_epoch="$(( $(date +%s) + INTERVAL_SECONDS ))"
@@ -218,7 +222,7 @@ run_daemon() {
       if (( sleep_seconds > remaining )); then
         sleep_seconds="${remaining}"
       fi
-      write_heartbeat "sleeping" "${last_exit_code}" "${next_sync_epoch}"
+      write_heartbeat "sleeping" "${DAEMON_LAST_EXIT_CODE}" "${next_sync_epoch}"
       sleep "${sleep_seconds}" &
       wait_pid=$!
       wait "${wait_pid}" 2>/dev/null || true

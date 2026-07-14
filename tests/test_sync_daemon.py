@@ -298,9 +298,20 @@ class SyncDaemonTests(unittest.TestCase):
                 self.assertIn("state=", heartbeat)
                 self.assertIn("interval_seconds=1", heartbeat)
             finally:
-                _run_daemon("stop", root=root, cache=cache)
+                stop = _run_daemon("stop", root=root, cache=cache)
+
+            self.assertEqual(stop.returncode, 0, stop.stderr)
 
             self.assertFalse((cache / "run" / "github-sync-daemon.pid").exists())
+            stopped_heartbeat = (
+                cache / "run" / "github-sync-daemon.heartbeat"
+            ).read_text(encoding="utf-8")
+            self.assertIn("state=stopped", stopped_heartbeat)
+            self.assertIn("last_sync_exit_code=0", stopped_heartbeat)
+            final_daemon_log = (
+                cache / "logs" / "github-sync-daemon.log"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("unbound variable", final_daemon_log)
 
 
 if __name__ == "__main__":
