@@ -461,6 +461,7 @@ class NewtonIKParameters:
     position_tolerance_m: float
     orientation_tolerance_rad: float
     joint_limit_tolerance: float
+    control_limit_margin_rad: float
     enable_self_collisions: bool
 
     def __post_init__(self) -> None:
@@ -516,6 +517,9 @@ class NewtonIKParameters:
         _nonnegative_finite(self.position_tolerance_m, "position_tolerance_m")
         _nonnegative_finite(self.orientation_tolerance_rad, "orientation_tolerance_rad")
         _nonnegative_finite(self.joint_limit_tolerance, "joint_limit_tolerance")
+        _nonnegative_finite(
+            self.control_limit_margin_rad, "control_limit_margin_rad"
+        )
         if not isinstance(self.enable_self_collisions, bool):
             raise ValueError("enable_self_collisions must be a boolean")
 
@@ -571,6 +575,9 @@ class NewtonIKParameters:
                 float(config.get("thresholds.orientation_error_deg"))
             ),
             joint_limit_tolerance=float(joint_limit_tolerance),
+            control_limit_margin_rad=float(
+                config.get("ik.control_limit_margin_rad")
+            ),
             enable_self_collisions=self_collision_value,
         )
 
@@ -731,6 +738,40 @@ class NewtonFrankaIKBackend:
         self.arm_dof_indices = tuple(arm_dof_indices)
         self._joint_limit_lower = self.model.joint_limit_lower.numpy().astype(float)
         self._joint_limit_upper = self.model.joint_limit_upper.numpy().astype(float)
+        self._control_limit_lower = self._joint_limit_lower.copy()
+        self._control_limit_upper = self._joint_limit_upper.copy()
+        for dof_index in self.arm_dof_indices:
+            self._control_limit_lower[dof_index] += (
+                self.parameters.control_limit_margin_rad
+            )
+            self._control_limit_upper[dof_index] -= (
+                self.parameters.control_limit_margin_rad
+            )
+            if not (
+                math.isfinite(self._control_limit_lower[dof_index])
+                and math.isfinite(self._control_limit_upper[dof_index])
+                and self._control_limit_lower[dof_index]
+                < self._control_limit_upper[dof_index]
+            ):
+                raise PipelineError(
+                    FailureCode.CONFIG_INVALID,
+                    "configured IK control-limit margin collapses a joint range",
+                    stage="newton_model",
+                    details={
+                        "dof_index": int(dof_index),
+                        "margin_rad": self.parameters.control_limit_margin_rad,
+                    },
+                )
+        self._control_limit_lower_device = wp.array(
+            self._control_limit_lower,
+            dtype=wp.float32,
+            device=device,
+        )
+        self._control_limit_upper_device = wp.array(
+            self._control_limit_upper,
+            dtype=wp.float32,
+            device=device,
+        )
         self._tcp_offset_position = _vector(
             parameters.end_effector_offset_position,
             3,
@@ -766,8 +807,8 @@ class NewtonFrankaIKBackend:
             weight=parameters.rotation_weight,
         )
         limit_objective = newton.ik.IKObjectiveJointLimit(
-            self.model.joint_limit_lower,
-            self.model.joint_limit_upper,
+            self._control_limit_lower_device,
+            self._control_limit_upper_device,
             weight=parameters.joint_limit_weight,
         )
         nominal_objective = JointNominalObjective(
@@ -938,8 +979,8 @@ class NewtonFrankaIKBackend:
             if np.isfinite(candidate).all():
                 candidate = project_scalar_joint_limits(
                     candidate,
-                    self._joint_limit_lower,
-                    self._joint_limit_upper,
+                    self._control_limit_lower,
+                    self._control_limit_upper,
                     self.dof_to_coord,
                 )
                 # The exact feasible projection, not a small optimizer

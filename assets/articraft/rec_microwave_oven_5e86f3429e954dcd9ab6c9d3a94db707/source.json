@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "record_id": "rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707",
+  "record_revision": "rev_000001",
+  "record_model_url": "https://github.com/mattzh72/articraft-data/blob/0cdcaa49f5571e9b4df04476c7f09587ee3ab7bd/records/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/revisions/rev_000001/model.py",
+  "articraft_repository": "https://github.com/mattzh72/articraft",
+  "articraft_commit": "59eb5e0ed72a734111012b43f881423b15d4931d",
+  "articraft_license": "Apache-2.0",
+  "data_repository": "https://github.com/mattzh72/articraft-data",
+  "data_commit": "0cdcaa49f5571e9b4df04476c7f09587ee3ab7bd",
+  "data_license": "CC-BY-4.0",
+  "materialized_urdf": "${AGENTPRE_CACHE_ROOT}/assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/model.urdf",
+  "inertial_completion": {
+    "specification_path": "assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/inertials.json",
+    "source_urdf_sha256": "03f6aa1366ddbf0b740f1e051bfb0b8f673c9cf7bc293ad37f6ac60289beff36",
+    "script": "scripts/apply_articraft_inertials.py",
+    "sidecar_name": "agentpre_inertial_completion.json",
+    "required_links": [
+      "cabinet",
+      "door",
+      "turntable",
+      "selector_knob_0",
+      "selector_knob_1"
+    ],
+    "state": "READY_REVIEWED_COLLISION_AABB_PROXY_VALUES",
+    "policy": "The compiler output must have exactly these five links and all must initially lack inertial elements. The reviewed specification derives deterministic proxy values from each link's compiled collision-envelope AABB at 300 kg/m^3 with a 0.02 kg floor and uniform-box inertia; it does not claim manufacturer-measured mass properties. Values are injected only from that checked-in JSON, and a fully matching postprocessed file is the only idempotent exception."
+  },
+  "door_joint": {
+    "name": "door_hinge",
+    "parent_link": "cabinet",
+    "child_link": "door",
+    "origin_xyz_m": [-0.255, -0.245, 0.215],
+    "axis": [0.0, 0.0, -1.0],
+    "lower_rad": 0.0,
+    "upper_rad": 1.75
+  },
+  "handle_geometry": {
+    "name": "pull_grip",
+    "parent_link": "door",
+    "primitive": "cylinder",
+    "center_xyz_m": [0.44, -0.055, 0.0],
+    "radius_m": 0.017,
+    "length_m": 0.172,
+    "axis": [0.0, 0.0, 1.0]
+  },
+  "scene_alignment": {
+    "object_world_position_m": [0.395, 0.02, 0.285],
+    "closed_handle_world_position_m": [0.58, -0.28, 0.5],
+    "rationale": "Align the real record closed handle center with the validated deterministic fixture before tuning."
+  }
+}

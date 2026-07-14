@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import copy
 from dataclasses import dataclass
+import hashlib
 from importlib import metadata as importlib_metadata
 import json
 import math
@@ -144,18 +145,84 @@ def _source_state(project_root: Path) -> dict[str, Any]:
     return result
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_asset_hashes(config: ProjectConfig) -> dict[str, str]:
+    """Bind each configured asset identity to the bytes used by the run."""
+
+    observed: dict[str, str] = {}
+    for kind in ("object", "robot"):
+        path = config.asset_path(kind)
+        expected = str(config.get(f"assets.{kind}.expected_urdf_sha256"))
+        if not path.is_file():
+            raise PipelineError(
+                FailureCode.ASSET_MISSING,
+                f"configured {kind} URDF does not exist",
+                stage="asset_identity",
+                details={
+                    "asset": kind,
+                    "path": str(path),
+                    "expected_urdf_sha256": expected,
+                },
+            )
+        try:
+            actual = _sha256_file(path)
+        except OSError as exc:
+            raise PipelineError(
+                FailureCode.ASSET_INVALID,
+                f"configured {kind} URDF cannot be hashed",
+                stage="asset_identity",
+                details={
+                    "asset": kind,
+                    "path": str(path),
+                    "expected_urdf_sha256": expected,
+                    "error": repr(exc),
+                },
+            ) from exc
+        if actual != expected:
+            raise PipelineError(
+                FailureCode.ASSET_INVALID,
+                f"configured {kind} URDF failed SHA-256 identity verification",
+                stage="asset_identity",
+                details={
+                    "asset": kind,
+                    "path": str(path),
+                    "expected_urdf_sha256": expected,
+                    "observed_urdf_sha256": actual,
+                },
+            )
+        observed[kind] = actual
+    return observed
+
+
 def _resolved_config_payload(
-    config: ProjectConfig, *, output_dir: Path
+    config: ProjectConfig,
+    *,
+    output_dir: Path,
+    observed_urdf_sha256: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Resolve filesystem placeholders and record the actual runtime state."""
 
+    hashes = (
+        dict(observed_urdf_sha256)
+        if observed_urdf_sha256 is not None
+        else _verify_asset_hashes(config)
+    )
     payload = copy.deepcopy(config.data)
     payload["project_root"] = str(config.project_root)
     payload["assets"]["object"]["urdf"] = str(config.asset_path("object"))
+    payload["assets"]["object"]["observed_urdf_sha256"] = hashes["object"]
     payload["assets"]["object"]["affordances"] = str(
         config.resolve_path(str(config.get("assets.object.affordances")))
     )
     payload["assets"]["robot"]["urdf"] = str(config.asset_path("robot"))
+    payload["assets"]["robot"]["observed_urdf_sha256"] = hashes["robot"]
     payload["assets"]["robot"]["bootstrap_source"] = str(
         config.resolve_path(str(config.get("assets.robot.bootstrap_source")))
     )
@@ -220,7 +287,36 @@ def _output_directory(
     """Resolve an explicit directory or reserve a non-overwriting run folder."""
 
     if override is not None:
-        return Path(override).expanduser().resolve()
+        destination = Path(override).expanduser().resolve()
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                if not destination.is_dir():
+                    raise PipelineError(
+                        FailureCode.OUTPUT_FAILURE,
+                        "explicit output path exists and is not a directory",
+                        stage="output",
+                        details={"path": str(destination)},
+                    )
+                if next(destination.iterdir(), None) is not None:
+                    raise PipelineError(
+                        FailureCode.OUTPUT_FAILURE,
+                        "explicit output directory must be empty",
+                        stage="output",
+                        details={"path": str(destination)},
+                    )
+            else:
+                destination.mkdir()
+        except PipelineError:
+            raise
+        except OSError as exc:
+            raise PipelineError(
+                FailureCode.OUTPUT_FAILURE,
+                "failed to reserve explicit output directory",
+                stage="output",
+                details={"error": repr(exc), "path": str(destination)},
+            ) from exc
+        return destination
     root = config.resolve_path(str(config.get("output.root")))
     root.mkdir(parents=True, exist_ok=True)
     normalized_mode = str(mode).strip().replace("/", "_")
@@ -821,6 +917,7 @@ def run_kinematic(
 ) -> RunOutcome:
     """Execute and persist one deterministic five-phase kinematic rollout."""
 
+    observed_urdf_sha256 = _verify_asset_hashes(config)
     _configure_deterministic_runtime(config)
     destination = _output_directory(config, output_dir)
     log = _RunLog(
@@ -831,7 +928,11 @@ def run_kinematic(
     if _bool_config(config, "output.write_resolved_config"):
         write_json(
             destination / "resolved_config.json",
-            _resolved_config_payload(config, output_dir=destination),
+            _resolved_config_payload(
+                config,
+                output_dir=destination,
+                observed_urdf_sha256=observed_urdf_sha256,
+            ),
         )
 
     object_urdf = config.asset_path("object")
@@ -1248,9 +1349,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.output_dir is not None
         else None
     )
+    destination_reserved = False
     try:
         config = load_config(args.config)
         destination = _output_directory(config, destination, mode=args.mode)
+        destination_reserved = True
         if args.mode == "kinematic":
             outcome = run_kinematic(config, output_dir=destination)
         else:
@@ -1282,7 +1385,11 @@ def main(argv: list[str] | None = None) -> int:
         return int(outcome.exit_code)
     except PipelineError as exc:
         failure = exc.to_dict()
-        if destination is not None:
+        if (
+            destination is not None
+            and destination_reserved
+            and exc.stage != "output"
+        ):
             try:
                 _write_failure(destination, mode=args.mode, failure=failure)
             except PipelineError:
@@ -1309,7 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
             "message": str(exc),
             "details": {"exception_type": type(exc).__name__},
         }
-        if destination is not None:
+        if destination is not None and destination_reserved:
             try:
                 _write_failure(destination, mode=args.mode, failure=failure)
             except PipelineError:

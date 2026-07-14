@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "asset_name": "articraft_commercial_microwave",
+  "asset_source": "mattzh72/articraft-data@0cdcaa49f5571e9b4df04476c7f09587ee3ab7bd:rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707:rev_000001",
+  "quaternion_order": "wxyz",
+  "frames": {
+    "pull_grip_center": {
+      "link": "door",
+      "position": [0.44, -0.055, 0.0],
+      "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+      "gripper_closing_axis": [1.0, 0.0, 0.0],
+      "approach_axis": [0.0, 1.0, 0.0],
+      "recommended_gripper_width_m": 0.044
+    }
+  }
+}

@@ -22,6 +22,9 @@ from src.transforms import pose_matrix
 
 
 ROOT = Path(__file__).resolve().parents[1]
+FIXTURE_URDF_SHA256 = (
+    "d6ba39f326d52a02efe6c4292accc8503e32c3a19a5462a90e564cddf52177a1"
+)
 
 
 class FakeBackend:
@@ -111,6 +114,7 @@ class RunTests(unittest.TestCase):
         data["assets"]["robot"]["urdf"] = str(
             ROOT / "assets/microwave/microwave.urdf"
         )
+        data["assets"]["robot"]["expected_urdf_sha256"] = FIXTURE_URDF_SHA256
         data["assets"]["robot"]["arm_joint_names"] = ["door_hinge"]
         data["assets"]["robot"]["default_joint_positions"] = [0.25]
         for phase in ("pregrasp", "approach", "close", "actuate", "retreat"):
@@ -223,12 +227,92 @@ class RunTests(unittest.TestCase):
                 str(ROOT / "assets/microwave/microwave.urdf"),
             )
             self.assertEqual(
+                resolved["assets"]["object"]["observed_urdf_sha256"],
+                FIXTURE_URDF_SHA256,
+            )
+            self.assertEqual(
+                resolved["assets"]["robot"]["observed_urdf_sha256"],
+                FIXTURE_URDF_SHA256,
+            )
+            self.assertEqual(
                 resolved["resolved_runtime"]["output_dir"], str(output_dir.resolve())
             )
             self.assertEqual(
                 resolved["resolved_runtime"]["environment"]["CUDA_VISIBLE_DEVICES"],
                 "",
             )
+
+    def test_cli_fails_closed_before_backend_on_asset_hash_mismatch(self) -> None:
+        for kind in ("object", "robot"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config_path = self._config(root, samples=1)
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+                data["assets"][kind]["expected_urdf_sha256"] = "0" * 64
+                config_path.write_text(json.dumps(data), encoding="utf-8")
+                output_dir = root / f"mismatch-{kind}"
+
+                exit_code = main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--mode",
+                        "kinematic",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(FakeBackend.instances, [])
+                self.assertFalse((output_dir / "resolved_config.json").exists())
+                metrics = json.loads((output_dir / "metrics.json").read_text())
+                failure = metrics["failure"]
+                self.assertEqual(failure["code"], FailureCode.ASSET_INVALID.value)
+                self.assertEqual(failure["stage"], "asset_identity")
+                self.assertEqual(failure["details"]["asset"], kind)
+                self.assertEqual(
+                    failure["details"]["observed_urdf_sha256"],
+                    FIXTURE_URDF_SHA256,
+                )
+
+    def test_explicit_output_directory_refuses_existing_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = self._config(root, samples=1)
+            output_dir = root / "existing-output"
+            output_dir.mkdir()
+            sentinel = output_dir / "sentinel.txt"
+            sentinel.write_text("immutable evidence\n", encoding="utf-8")
+
+            exit_code = main(
+                [
+                    "--config",
+                    str(config_path),
+                    "--mode",
+                    "kinematic",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "immutable evidence\n")
+            self.assertEqual(list(output_dir.iterdir()), [sentinel])
+
+            config_path.write_text('{"not": "a project config"}', encoding="utf-8")
+            config_exit_code = main(
+                [
+                    "--config",
+                    str(config_path),
+                    "--mode",
+                    "kinematic",
+                    "--output-dir",
+                    str(output_dir),
+                ]
+            )
+            self.assertEqual(config_exit_code, 2)
+            self.assertEqual(list(output_dir.iterdir()), [sentinel])
 
     def test_cli_writes_structured_collision_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

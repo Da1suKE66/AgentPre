@@ -45,13 +45,14 @@ def box_urdf(
     *,
     geometry: str = '<box size="0.02 0.04 0.20"/>',
     origin: str = '<origin xyz="1 2 3" rpy="0 0 0"/>',
+    link_name: str = "handle",
 ) -> str:
     return textwrap.dedent(
         f"""\
         <?xml version="1.0"?>
         <robot name="fixture">
           <link name="base"/>
-          <link name="handle">
+          <link name="{link_name}">
             <collision>
               {origin}
               <geometry>{geometry}</geometry>
@@ -59,7 +60,7 @@ def box_urdf(
           </link>
           <joint name="handle_mount" type="fixed">
             <parent link="base"/>
-            <child link="handle"/>
+            <child link="{link_name}"/>
           </joint>
         </robot>
         """
@@ -145,6 +146,27 @@ class AffordanceTests(unittest.TestCase):
         self.assertEqual(len(resolution.candidates), 1)
         self.assertEqual(resolution.candidates[0].candidate_id, "frame:handle_grasp")
         self.assertEqual(resolution.candidates[0].gripper_width_m, 0.04)
+
+    def test_authored_frame_may_be_attached_directly_to_a_door_link(self) -> None:
+        raw = affordances_json()
+        raw["frames"]["handle_grasp"]["link"] = "door_panel"
+        path = self.write_json(raw)
+        urdf_path = self.write_urdf(box_urdf(link_name="door_panel"))
+
+        resolution = resolve_handle_candidates(
+            path,
+            "handle_grasp",
+            urdf_path,
+            "door_panel",
+            config=self.generation_config(max_gripper_width_m=0.08),
+        )
+
+        self.assertFalse(resolution.used_geometry_fallback)
+        self.assertEqual(resolution.candidates[0].link_name, "door_panel")
+        np.testing.assert_allclose(
+            resolution.candidates[0].transform[:3, 3],
+            [0.1, -0.2, 0.3],
+        )
 
     def test_missing_frame_falls_back_to_box_aabb_and_pca(self) -> None:
         affordance_path = self.write_json(affordances_json(frames={}))

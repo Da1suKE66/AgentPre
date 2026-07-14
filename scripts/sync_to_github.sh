@@ -38,6 +38,32 @@ if ! git diff --cached --quiet; then
   exit 5
 fi
 
+# Remember the ordinary index bytes before doing any alternate-index work.  A
+# user may stage a file while this script is building its isolated commit.  In
+# that case refreshing the ordinary index to the new HEAD would silently erase
+# their staging, so the refresh below is allowed only when this fingerprint is
+# unchanged.  A repository without an index is represented explicitly rather
+# than confused with an empty file.
+ORDINARY_INDEX_PATH="$(git rev-parse --git-path index)"
+ordinary_index_fingerprint() {
+  if [[ -f "${ORDINARY_INDEX_PATH}" ]]; then
+    git hash-object --no-filters -- "${ORDINARY_INDEX_PATH}"
+  elif [[ -e "${ORDINARY_INDEX_PATH}" ]]; then
+    echo "Refusing periodic sync because the ordinary Git index is not a regular file: ${ORDINARY_INDEX_PATH}" >&2
+    return 1
+  else
+    printf '%s\n' "INDEX_ABSENT"
+  fi
+}
+ORDINARY_INDEX_FINGERPRINT_BEFORE="$(ordinary_index_fingerprint)"
+# Close the small gap between the initial staged-work check and the snapshot:
+# staging that completed in that interval must stop the sync before the
+# alternate index can move HEAD.
+if ! git diff --cached --quiet; then
+  echo "Refusing periodic sync because the working index gained staged changes before isolated-index work began." >&2
+  exit 5
+fi
+
 # Build the commit from an isolated index.  This prevents an unrelated file
 # staged by an interactive user from being swept into the periodic commit.
 INDEX_FILE="$(mktemp "${CACHE_ROOT}/tmp/github-sync-index.XXXXXX")"
@@ -81,7 +107,13 @@ fi
 if ! GIT_INDEX_FILE="${INDEX_FILE}" git diff --cached --quiet; then
   GIT_INDEX_FILE="${INDEX_FILE}" git commit -m "sync: AgentPre $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   # The alternate index created the new HEAD; refresh the normal clean index
-  # to that commit without changing any working-tree file.
+  # to that commit without changing any working-tree file.  Fail closed if an
+  # interactive process staged anything after our initial check.
+  ORDINARY_INDEX_FINGERPRINT_AFTER="$(ordinary_index_fingerprint)"
+  if [[ "${ORDINARY_INDEX_FINGERPRINT_AFTER}" != "${ORDINARY_INDEX_FINGERPRINT_BEFORE}" ]]; then
+    echo "Refusing to refresh the ordinary Git index because it changed during periodic sync; user staging was preserved." >&2
+    exit 6
+  fi
   git read-tree HEAD
 fi
 

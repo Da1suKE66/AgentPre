@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "state": "ready",
+  "source_urdf_sha256": "03f6aa1366ddbf0b740f1e051bfb0b8f673c9cf7bc293ad37f6ac60289beff36",
+  "record": {
+    "id": "rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707",
+    "revision": "rev_000001",
+    "data_commit": "0cdcaa49f5571e9b4df04476c7f09587ee3ab7bd",
+    "model_url": "https://github.com/mattzh72/articraft-data/blob/0cdcaa49f5571e9b4df04476c7f09587ee3ab7bd/records/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/revisions/rev_000001/model.py"
+  },
+  "units": {
+    "mass": "kg",
+    "length": "m",
+    "angle": "rad",
+    "inertia": "kg*m^2"
+  },
+  "links": {
+    "cabinet": {
+      "mass_kg": 26.33232,
+      "origin_xyz_m": [0.0, -0.0205, 0.17],
+      "origin_rpy_rad": [0.0, 0.0, 0.0],
+      "inertia_kg_m2": {
+        "ixx": 0.72001559756,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyy": 0.941819312,
+        "iyz": 0.0,
+        "izz": 1.15449887756
+      }
+    },
+    "door": {
+      "mass_kg": 2.8864512,
+      "origin_xyz_m": [0.244, -0.0285, 0.0],
+      "origin_rpy_rad": [0.0, 0.0, 0.0],
+      "inertia_kg_m2": {
+        "ixx": 0.01304315136,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyy": 0.07427801088,
+        "iyz": 0.0,
+        "izz": 0.0648761177088
+      }
+    },
+    "turntable": {
+      "mass_kg": 0.4964544,
+      "origin_xyz_m": [0.0, 0.0, -0.0015],
+      "origin_rpy_rad": [0.0, 0.0, 0.0],
+      "inertia_kg_m2": {
+        "ixx": 0.0040391943696,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyy": 0.0040391943696,
+        "iyz": 0.0,
+        "izz": 0.0080544761856
+      }
+    },
+    "selector_knob_0": {
+      "mass_kg": 0.0738896670888,
+      "origin_xyz_m": [0.0, 0.0, 0.01948],
+      "origin_rpy_rad": [0.0, 0.0, 0.0],
+      "inertia_kg_m2": {
+        "ixx": 0.0000482728688734868,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyy": 0.0000482728688734868,
+        "iyz": 0.0,
+        "izz": 0.0000778531100629377
+      }
+    },
+    "selector_knob_1": {
+      "mass_kg": 0.0738896670888,
+      "origin_xyz_m": [0.0, 0.0, 0.01948],
+      "origin_rpy_rad": [0.0, 0.0, 0.0],
+      "inertia_kg_m2": {
+        "ixx": 0.0000482728688734868,
+        "ixy": 0.0,
+        "ixz": 0.0,
+        "iyy": 0.0000482728688734868,
+        "iyz": 0.0,
+        "izz": 0.0000778531100629377
+      }
+    }
+  },
+  "notes": [
+    "Derived from collision geometry in pristine compiled model.urdf SHA-256 03f6aa1366ddbf0b740f1e051bfb0b8f673c9cf7bc293ad37f6ac60289beff36; mesh bounds include each URDF origin and mesh scale.",
+    "Deterministic proxy policy: take the union collision AABB in each link frame, use its center as COM, mass=max(300 kg/m^3 * AABB volume, 0.02 kg), and use the diagonal uniform-solid-box inertia about that center; rpy and all products of inertia are zero.",
+    "Reviewed AABBs [min; max] m: cabinet [-0.28,-0.251,0; 0.28,0.21,0.34], door [-0.012,-0.072,-0.108; 0.5,0.015,0.108], turntable [-0.156,-0.156,-0.01; 0.156,0.156,0.007], selector_knob_0/1 [-0.039755,-0.039755,0; 0.039755,0.039755,0.03896].",
+    "These are reproducible collision-envelope proxies for deterministic simulation, not manufacturer-measured component masses or CAD volume integrals."
+  ]
+}

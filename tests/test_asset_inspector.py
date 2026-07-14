@@ -108,6 +108,18 @@ class AssetInspectorTests(unittest.TestCase):
         self.assertTrue(report.meshes[0].exists)
         json.dumps(report.to_dict())
 
+    def test_door_link_may_also_be_the_handle_frame_parent(self) -> None:
+        report = self.inspect(
+            self.write_urdf(valid_urdf()),
+            handle_link_name="door",
+        )
+
+        self.assertTrue(report.ok, [issue.to_dict() for issue in report.errors])
+        self.assertNotIn(
+            "HANDLE_NOT_ATTACHED_TO_DOOR",
+            {issue.code for issue in report.errors},
+        )
+
     def test_configured_names_are_checked_without_indices(self) -> None:
         path = self.write_urdf(valid_urdf())
         report = self.inspect(

@@ -11,7 +11,7 @@ from unittest import mock
 
 import numpy as np
 
-from src.config import load_config
+from src.config import ProjectConfig, load_config
 from src.errors import FailureCode, PipelineError
 from src.physics_assisted import (
     NewtonPhysicsAssistedSimulator,
@@ -47,6 +47,18 @@ def ref(name: str, coord: int, dof: int) -> ScalarJointRef:
 
 
 class PhysicsTrajectoryTests(unittest.TestCase):
+    def test_post_step_state_times_use_frame_endpoints(self) -> None:
+        import src.physics_assisted as module
+
+        actual = module._post_step_state_sample_times(4, 0.02)
+        expected = (np.arange(4, dtype=float) + 1.0) * 0.02
+        np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+        self.assertEqual(actual[0], 0.02)
+        self.assertEqual(actual[-1], 0.08)
+        audit = module._physics_safety_audit_metadata()
+        self.assertEqual(audit["state_sample_timing"], "post_step_end_of_frame")
+        self.assertIs(audit["grasp_parent_child_collision_filtered"], False)
+
     def test_commands_are_validated_copied_and_read_only(self) -> None:
         phases = np.asarray(["pregrasp", "close", "actuate", "retreat"])
         arm = np.zeros((4, 2))
@@ -109,6 +121,56 @@ class PhysicsTrajectoryTests(unittest.TestCase):
             atol=1.0e-12,
         )
 
+    def test_articraft_same_link_handle_anchor_matches_authored_tcp(self) -> None:
+        config = json.loads(
+            (ROOT / "configs/articraft_microwave_franka.json").read_text()
+        )
+        affordances = json.loads(
+            (
+                ROOT
+                / "assets/articraft"
+                / "rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707"
+                / "affordances.json"
+            ).read_text()
+        )
+        object_config = config["assets"]["object"]
+        frame = affordances["frames"][object_config["handle_frame"]]
+        self.assertEqual(object_config["handle_link"], object_config["door_link"])
+        self.assertEqual(frame["link"], object_config["door_link"])
+
+        robot_offset = config["assets"]["robot"]["end_effector_offset"]
+        grasp_offset = config["task"]["grasp_offset"]
+        hand_to_tcp = pose_matrix(
+            robot_offset["position"], robot_offset["orientation_wxyz"]
+        )
+        door_to_handle = pose_matrix(frame["position"], frame["quaternion_wxyz"])
+        handle_to_tcp = pose_matrix(
+            grasp_offset["position"], grasp_offset["orientation_wxyz"]
+        )
+        anchors = planned_fixed_grasp_anchors(
+            hand_to_tcp, door_to_handle, handle_to_tcp
+        )
+
+        door_world = pose_matrix(
+            [0.14, -0.21, 0.52],
+            [np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)],
+        )
+        expected_tcp_world = compose_transforms(
+            door_world, door_to_handle, handle_to_tcp
+        )
+        hand_world = compose_transforms(expected_tcp_world, np.linalg.inv(hand_to_tcp))
+        gate = evaluate_fixed_grasp_activation_gate(
+            hand_world,
+            door_world,
+            anchors,
+            frame_index=0,
+            position_limit_m=1.0e-9,
+            orientation_limit_deg=1.0e-7,
+        )
+        self.assertTrue(gate.passed)
+        self.assertLess(gate.position_error_m, 1.0e-12)
+        self.assertLess(gate.orientation_error_deg, 1.0e-9)
+
     def test_planned_grasp_anchors_reject_remote_latch(self) -> None:
         hand_to_tcp = pose_matrix([0.0, 0.0, 0.1], [1.0, 0.0, 0.0, 0.0])
         link_to_handle = pose_matrix([0.0, 0.0, 0.05], [1.0, 0.0, 0.0, 0.0])
@@ -120,17 +182,56 @@ class PhysicsTrajectoryTests(unittest.TestCase):
         expected_tcp_world = compose_transforms(handle_world, link_to_handle, handle_to_tcp)
         hand_world = compose_transforms(expected_tcp_world, np.linalg.inv(hand_to_tcp))
         passing = evaluate_fixed_grasp_activation_gate(
-            hand_world, handle_world, anchors, frame_index=4
+            hand_world,
+            handle_world,
+            anchors,
+            frame_index=4,
+            position_limit_m=0.015,
+            orientation_limit_deg=7.5,
         )
         self.assertTrue(passing.passed)
 
         remote_hand = hand_world.copy()
         remote_hand[0, 3] += 0.02
         rejected = evaluate_fixed_grasp_activation_gate(
-            remote_hand, handle_world, anchors, frame_index=4
+            remote_hand,
+            handle_world,
+            anchors,
+            frame_index=4,
+            position_limit_m=0.015,
+            orientation_limit_deg=7.5,
         )
         self.assertFalse(rejected.passed)
         self.assertGreater(rejected.position_error_m, 0.015)
+
+    def test_fixed_grasp_joint_preserves_parent_child_collision(self) -> None:
+        builder = mock.Mock()
+        builder.add_joint_fixed.return_value = 17
+        parent_xform = object()
+        child_xform = object()
+
+        joint_index = NewtonPhysicsAssistedSimulator._add_disabled_fixed_grasp_joint(
+            builder,
+            parent=3,
+            child=8,
+            parent_xform=parent_xform,
+            child_xform=child_xform,
+        )
+
+        self.assertEqual(joint_index, 17)
+        builder.add_joint_fixed.assert_called_once_with(
+            parent=3,
+            child=8,
+            parent_xform=parent_xform,
+            child_xform=child_xform,
+            label="agentpre_fixed_grasp",
+            collision_filter_parent=False,
+            enabled=False,
+        )
+        self.assertIs(
+            builder.add_joint_fixed.call_args.kwargs["collision_filter_parent"],
+            False,
+        )
 
     def test_kinematic_twist_uses_com_and_world_angular_velocity(self) -> None:
         before = np.eye(4)[None, :, :]
@@ -293,6 +394,30 @@ class PhysicsContactEvidenceTests(unittest.TestCase):
 
 
 class PhysicsConfigurationTests(unittest.TestCase):
+    def test_broad_phase_is_case_normalized_and_strictly_validated(self) -> None:
+        import src.physics_assisted as module
+
+        config_path = ROOT / "configs/microwave_franka.json"
+        config = ProjectConfig(
+            path=config_path,
+            project_root=ROOT,
+            data=json.loads(config_path.read_text()),
+        )
+        params = PhysicsParameters.from_project_config(config)
+        self.assertEqual(
+            replace(params, collision_broad_phase="  SaP  ").collision_broad_phase,
+            "sap",
+        )
+        self.assertEqual(module._normalize_newton_broad_phase("  SaP  "), "sap")
+        self.assertEqual(module._normalize_newton_broad_phase("NXN"), "nxn")
+        self.assertEqual(
+            module._normalize_newton_broad_phase("Explicit"), "explicit"
+        )
+        with self.assertRaisesRegex(ValueError, "expected sap, nxn, or explicit"):
+            module._normalize_newton_broad_phase("gpu_grid")
+        with self.assertRaisesRegex(ValueError, "must be a string"):
+            module._normalize_newton_broad_phase(None)
+
     def test_physics_scene_starts_at_first_robot_command(self) -> None:
         params = PhysicsParameters.from_project_config(
             load_config("configs/microwave_franka.json")
@@ -322,7 +447,36 @@ class PhysicsConfigurationTests(unittest.TestCase):
         self.assertEqual(params.door_joint, "door_hinge")
         self.assertTrue(params.fixed_grasp_enabled)
         self.assertEqual(params.fixed_grasp_activate_after_phase, "close")
-        self.assertEqual(params.robot_control_backend, "kinematic_body_driver")
+        self.assertEqual(params.robot_control_backend, "joint_pd")
+        self.assertEqual(
+            params.robot_control_implementation, "newton_xpbd_joint_targets"
+        )
+        self.assertEqual(params.target_velocity_mode, "finite_difference")
+        self.assertGreater(params.arm_stiffness, 0.0)
+        self.assertGreater(params.arm_damping, 0.0)
+        self.assertAlmostEqual(params.grasp_activation_position_tolerance_m, 0.015)
+
+    def test_builder_pd_configuration_writes_only_named_robot_slots(self) -> None:
+        builder = SimpleNamespace(
+            joint_q=[0.1, 0.2, 0.3, 0.4],
+            joint_target_q=[-1.0, -1.0, 9.0, -1.0],
+            joint_target_qd=[-2.0, -2.0, 8.0, -2.0],
+            joint_target_ke=[-3.0, -3.0, 7.0, -3.0],
+            joint_target_kd=[-4.0, -4.0, 6.0, -4.0],
+        )
+        NewtonPhysicsAssistedSimulator._set_builder_robot_pd(
+            builder,
+            (ref("arm", 0, 0),),
+            (ref("left", 1, 1), ref("right", 3, 3)),
+            arm_stiffness=650.0,
+            arm_damping=100.0,
+            finger_stiffness=300.0,
+            finger_damping=40.0,
+        )
+        self.assertEqual(builder.joint_target_q, [0.1, 0.2, 9.0, 0.4])
+        self.assertEqual(builder.joint_target_qd, [0.0, 0.0, 8.0, 0.0])
+        self.assertEqual(builder.joint_target_ke, [650.0, 300.0, 7.0, 300.0])
+        self.assertEqual(builder.joint_target_kd, [100.0, 40.0, 6.0, 40.0])
 
     def test_missing_or_wrong_newton_version_is_structured_unavailable(self) -> None:
         import src.physics_assisted as module
@@ -369,11 +523,14 @@ class _FakePhysicsSimulator:
         )
         return PhysicsRollout(
             phase_names=commands.phase_names.copy(),
-            time_s=np.arange(frame_count, dtype=float) * self.parameters.dt,
+            time_s=(
+                (np.arange(frame_count, dtype=float) + 1.0)
+                * self.parameters.dt
+            ),
             command_joint_q=full_q.copy(),
             measured_joint_q=full_q.copy(),
             measured_joint_qd=np.zeros_like(full_q),
-            robot_driver_arm_joint_q=commands.arm_joint_targets.copy(),
+            measured_arm_joint_q=commands.arm_joint_targets.copy(),
             door_angle_rad=door,
             ee_pose_wxyz=np.repeat(pose[None, :], frame_count, axis=0),
             handle_link_pose_wxyz=np.repeat(
@@ -397,8 +554,17 @@ class _FakePhysicsSimulator:
             metadata={
                 "status": "completed",
                 "backend": "fake_newton_1_3",
-                "control_backend": "kinematic_body_driver",
-                "door_actuation": "none",
+                "state_sample_timing": "post_step_end_of_frame",
+                "constraint_backend": "fake_fixed_grasp",
+                "control_backend": "joint_pd",
+                "robot_control_implementation": "newton_xpbd_joint_targets",
+                "robot_target_write_backend": "indexed_scatter_controlled_robot_coordinates_and_dofs_only",
+                "robot_body_state_write_backend": "none",
+                "robot_body_indices_written": [],
+                "joint_force_write_backend": "none",
+                "joint_pd_controller_used": True,
+                "door_actuation": "passive_velocity_damping_only",
+                "door_position_actuation": "none",
                 "door_runtime_position_write_count": 0,
                 "door_runtime_velocity_write_count": 0,
                 "door_runtime_target_write_count": 0,
@@ -406,11 +572,17 @@ class _FakePhysicsSimulator:
                 "door_zero_write_evidence": "static_indexed_control_path_guarantee",
                 "door_coord_excluded_from_driver": True,
                 "door_dof_excluded_from_driver": True,
+                "door_coord_excluded_from_target_writer": True,
+                "door_dof_excluded_from_target_writer": True,
+                "door_target_values_unchanged_verified": True,
+                "robot_body_inverse_mass_positive_verified": True,
+                "robot_body_flags_dynamic_verified": True,
                 "robot_object_body_index_sets_disjoint": True,
                 "door_reference_semantics": "diagnostic_only_never_applied",
                 "collision_evidence_scope": "cross_asset_robot_object",
                 "collision_margin_m": 0.003,
                 "pose_layout": "xyz_wxyz",
+                "grasp_parent_child_collision_filtered": False,
             },
         )
 
@@ -429,6 +601,9 @@ class PhysicsCliIntegrationTests(unittest.TestCase):
         )
         data["assets"]["robot"]["urdf"] = str(
             ROOT / "assets/microwave/microwave.urdf"
+        )
+        data["assets"]["robot"]["expected_urdf_sha256"] = (
+            "d6ba39f326d52a02efe6c4292accc8503e32c3a19a5462a90e564cddf52177a1"
         )
         data["assets"]["robot"]["arm_joint_names"] = ["door_hinge"]
         data["assets"]["robot"]["default_joint_positions"] = [0.25]
@@ -454,6 +629,33 @@ class PhysicsCliIntegrationTests(unittest.TestCase):
         expected = compose_transforms(world_link, link_frame)
         np.testing.assert_allclose(actual, expected, atol=1.0e-12)
         np.testing.assert_allclose(actual[:3, 3], [1.0, 2.2, 3.0], atol=1.0e-12)
+
+    def test_physics_acceptance_fails_closed_when_reference_fails(self) -> None:
+        import src.physics_assisted as module
+
+        physics_pass = {
+            "success": True,
+            "gates": {
+                "physics_metric": {
+                    "value": 0.0,
+                    "operator": "<=",
+                    "threshold": 1.0,
+                    "passed": True,
+                }
+            },
+        }
+        failed = module._with_kinematic_reference_acceptance(physics_pass, False)
+        self.assertFalse(failed["success"])
+        self.assertFalse(
+            failed["gates"]["kinematic_reference_acceptance"]["passed"]
+        )
+        self.assertNotIn("kinematic_reference_acceptance", physics_pass["gates"])
+
+        passed = module._with_kinematic_reference_acceptance(physics_pass, True)
+        self.assertTrue(passed["success"])
+        self.assertTrue(
+            passed["gates"]["kinematic_reference_acceptance"]["passed"]
+        )
 
     def test_reference_json_and_missing_door_audit_fail_closed(self) -> None:
         import src.physics_assisted as module
@@ -534,10 +736,24 @@ class PhysicsCliIntegrationTests(unittest.TestCase):
             metrics = json.loads((output_dir / "metrics.json").read_text())
             self.assertEqual(metrics["mode"], "physics_assisted")
             self.assertEqual(metrics["run_status"], "acceptance_failed")
+            self.assertTrue(
+                metrics["gates"]["kinematic_reference_acceptance"]["passed"]
+            )
+            self.assertTrue(metrics["kinematic_reference"]["acceptance_passed"])
             self.assertEqual(metrics["collision_scope"], "cross_asset_robot_object")
             self.assertEqual(metrics["collision_frame_count"], 1)
             self.assertAlmostEqual(metrics["collision_frame_ratio"], 0.2)
             self.assertEqual(metrics["final_door_angle_deg"], 0.0)
+            self.assertEqual(
+                metrics["physics_metadata"]["state_sample_timing"],
+                "post_step_end_of_frame",
+            )
+            self.assertIs(
+                metrics["physics_metadata"][
+                    "grasp_parent_child_collision_filtered"
+                ],
+                False,
+            )
             self.assertTrue(
                 metrics["door_runtime_write_audit"]["guaranteed_zero_runtime_writes"]
             )
@@ -547,6 +763,15 @@ class PhysicsCliIntegrationTests(unittest.TestCase):
             )
 
             with np.load(output_dir / "trajectory.npz", allow_pickle=False) as data:
+                dt = float(
+                    json.loads(config_path.read_text())["simulation"]["dt"]
+                )
+                np.testing.assert_allclose(
+                    data["time_s"],
+                    (np.arange(5, dtype=float) + 1.0) * dt,
+                    rtol=0.0,
+                    atol=0.0,
+                )
                 np.testing.assert_allclose(data["door_angle_rad"], 0.0)
                 self.assertGreater(float(data["reference_door_angle_rad"][-1]), 1.0)
                 np.testing.assert_array_equal(

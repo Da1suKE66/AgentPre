@@ -35,6 +35,36 @@ class DoorTrajectoryTests(unittest.TestCase):
         self.assertEqual(lower, 0.0)
         self.assertGreater(upper, math.radians(65.0))
 
+    def test_explicit_handle_frame_may_be_authored_on_the_door_link(self) -> None:
+        same_link_kinematics = DoorKinematics(
+            model=self.kinematics.model,
+            root_world_transform=self.kinematics.root_world_transform,
+            door_joint_name="door_hinge",
+            door_link_name="microwave_door",
+            handle_link_name="microwave_door",
+        )
+        # This is the checked-in fixture's door->handle_mount transform.  A
+        # single-link Articraft export can encode it directly in affordances.json.
+        door_to_handle_frame = pose_matrix(
+            [0.43, -0.0525, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        )
+
+        for angle in (0.0, math.radians(65.0)):
+            explicit_frame_world = same_link_kinematics.handle_frame_transform(
+                angle,
+                door_to_handle_frame,
+            )
+            separate_link_world = self.kinematics.handle_frame_transform(
+                angle,
+                np.eye(4),
+            )
+            np.testing.assert_allclose(
+                explicit_frame_world,
+                separate_link_world,
+                atol=1.0e-12,
+            )
+
     def test_five_phase_plan_and_fixed_grasp_transform(self) -> None:
         phase_samples = {
             "pregrasp": 2,
@@ -75,4 +105,3 @@ class DoorTrajectoryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

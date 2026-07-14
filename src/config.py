@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from .errors import FailureCode, PipelineError
 
 
 PHASE_ORDER = ("pregrasp", "approach", "close", "actuate", "retreat")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def _lookup(data: dict[str, Any], dotted: str) -> Any:
@@ -196,6 +198,7 @@ def validate_config(data: dict[str, Any]) -> None:
     required_strings = (
         "assets.object.name",
         "assets.object.urdf",
+        "assets.object.expected_urdf_sha256",
         "assets.object.door_joint",
         "assets.object.door_link",
         "assets.object.handle_link",
@@ -203,6 +206,7 @@ def validate_config(data: dict[str, Any]) -> None:
         "assets.object.handle_frame",
         "assets.robot.name",
         "assets.robot.urdf",
+        "assets.robot.expected_urdf_sha256",
         "assets.robot.end_effector_link",
         "collision.broad_phase",
         "collision.scope",
@@ -210,6 +214,9 @@ def validate_config(data: dict[str, Any]) -> None:
         "ik.jacobian",
         "simulation.solver",
         "simulation.robot_control.backend",
+        "simulation.robot_control.implementation",
+        "simulation.robot_control.target_velocity_mode",
+        "simulation.door_control.backend",
         "simulation.fixed_grasp_constraint.activate_after_phase",
         "runtime.device",
         "output.root",
@@ -222,6 +229,19 @@ def validate_config(data: dict[str, Any]) -> None:
                 f"{dotted} must be a non-empty string",
                 stage="config",
                 details={"field": dotted},
+            )
+
+    for dotted in (
+        "assets.object.expected_urdf_sha256",
+        "assets.robot.expected_urdf_sha256",
+    ):
+        value = _lookup(data, dotted)
+        if _SHA256_PATTERN.fullmatch(value) is None:
+            raise PipelineError(
+                FailureCode.CONFIG_INVALID,
+                f"{dotted} must be a lowercase 64-character SHA-256 digest",
+                stage="config",
+                details={"field": dotted, "value": value},
             )
 
     _validate_pose(data, "assets.object.world_pose")
@@ -291,6 +311,36 @@ def validate_config(data: dict[str, Any]) -> None:
     _positive_number(data, "simulation.dt")
     _positive_integer(data, "simulation.physics_substeps")
     _positive_integer(data, "simulation.solver_iterations")
+    for dotted in (
+        "simulation.robot_control.arm_stiffness",
+        "simulation.robot_control.arm_damping",
+        "simulation.robot_control.finger_stiffness",
+        "simulation.robot_control.finger_damping",
+        "simulation.fixed_grasp_constraint.activation_position_tolerance_m",
+        "simulation.fixed_grasp_constraint.activation_orientation_tolerance_deg",
+    ):
+        _positive_number(data, dotted)
+    door_stiffness = _positive_number(
+        data, "simulation.door_control.target_stiffness", allow_zero=True
+    )
+    if door_stiffness != 0.0:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.door_control.target_stiffness must be exactly 0",
+            stage="config",
+            details={"value": door_stiffness},
+        )
+    _positive_number(data, "simulation.door_control.target_damping")
+    door_target_velocity = _finite_number(
+        data, "simulation.door_control.target_velocity_rad_s"
+    )
+    if door_target_velocity != 0.0:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.door_control.target_velocity_rad_s must be exactly 0",
+            stage="config",
+            details={"value": door_target_velocity},
+        )
     _positive_integer(data, "ik.iterations")
     runtime_threads = _positive_integer(data, "runtime.threads")
     if runtime_threads != 1:
@@ -304,6 +354,7 @@ def validate_config(data: dict[str, Any]) -> None:
     _positive_number(data, "ik.rotation_weight")
     _positive_number(data, "ik.joint_limit_weight")
     _positive_number(data, "ik.nominal_posture_weight", allow_zero=True)
+    _positive_number(data, "ik.control_limit_margin_rad")
     _positive_number(data, "ik.step_size")
     _positive_number(data, "ik.lambda_initial")
     _positive_number(data, "ik.joint_limit_tolerance_rad", allow_zero=True)
@@ -398,15 +449,42 @@ def validate_config(data: dict[str, Any]) -> None:
             "simulation.solver must be 'xpbd'",
             stage="config",
         )
-    if str(_lookup(data, "simulation.robot_control.backend")).lower() != "kinematic_body_driver":
+    if str(_lookup(data, "simulation.robot_control.backend")).lower() != "joint_pd":
         raise PipelineError(
             FailureCode.CONFIG_INVALID,
-            "simulation.robot_control.backend must be 'kinematic_body_driver'",
+            "simulation.robot_control.backend must be 'joint_pd'",
             stage="config",
             details={
                 "field": "simulation.robot_control.backend",
                 "value": _lookup(data, "simulation.robot_control.backend"),
             },
+        )
+    if (
+        str(_lookup(data, "simulation.robot_control.implementation")).lower()
+        != "newton_xpbd_joint_targets"
+    ):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.robot_control.implementation must be 'newton_xpbd_joint_targets'",
+            stage="config",
+        )
+    if (
+        str(_lookup(data, "simulation.robot_control.target_velocity_mode")).lower()
+        != "finite_difference"
+    ):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.robot_control.target_velocity_mode must be 'finite_difference'",
+            stage="config",
+        )
+    if (
+        str(_lookup(data, "simulation.door_control.backend")).lower()
+        != "passive_velocity_damping"
+    ):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.door_control.backend must be 'passive_velocity_damping'",
+            stage="config",
         )
     if str(_lookup(data, "collision.broad_phase")).lower() != "sap":
         raise PipelineError(

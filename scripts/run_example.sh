@@ -6,6 +6,5 @@ source "${ROOT}/scripts/env.sh"
 cd "${ROOT}"
 
 python -m src.run \
-  --config configs/microwave_franka.json \
+  --config "${2:-configs/microwave_franka.json}" \
   --mode "${1:-kinematic}"
-

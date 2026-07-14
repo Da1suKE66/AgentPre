@@ -2,22 +2,26 @@
 
 AgentPre compiles an articulated microwave task into a deterministic five-phase
 trajectory and solves it with Newton 1.3's analytic Levenberg-Marquardt IK.  It
-also has a CPU-only `physics_assisted` mode: the Franka links are prescribed by
-a named-link kinematic body driver while Newton advances the dynamic microwave
-door and the grasp constraint.  This mode deliberately does **not** claim a
-torque-controlled or fully dynamic robot.  The first-stage controller is not an
-LLM; a future agent can call this deterministic compiler/runtime as a tool.
+also has a CPU-only `physics_assisted` mode: dynamic Franka bodies track the IK
+trajectory through Newton XPBD joint position/velocity PD targets while Newton
+advances the dynamic microwave door and the grasp constraint.  No robot body
+pose or generalized force is prescribed at runtime.  The first-stage controller
+is not an LLM; a future agent can call this deterministic compiler/runtime as a
+tool.
 
-The checked-in microwave is a small deterministic URDF fixture used for pipeline
-verification.  It is clearly marked `deterministic_test_fixture_not_articraft`
-and must not be presented as an Articraft export.  Replace the object URDF and
-affordance paths in the config when a real Articraft export is available; no code
-or simulator indices need to change.
+The checked-in microwave URDF is a small deterministic fixture used for fast
+pipeline verification.  It is clearly marked
+`deterministic_test_fixture_not_articraft` and must not be presented as an
+Articraft export.  A separate `configs/articraft_microwave_franka.json` targets
+the real official Articraft Data record
+`rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707`.  Its generated URDF and
+meshes stay in `/cache/liluchen/agentpre/assets`; only the compact explicit
+handle affordance and source/license metadata are checked into Git.
 
 ## Repository layout
 
 ```text
-assets/       microwave fixture, meshes, and affordances.json
+assets/       fixture plus compact Articraft affordance/source metadata
 configs/      all asset names, poses, controls, solver settings, and gates
 src/          inspection, FK, grasp candidates, IK, collision, metrics, CLI
 tests/        dependency-light unit tests
@@ -53,14 +57,100 @@ source scripts/env.sh
 
 `scripts/env.sh` hides CUDA and fixes numerical thread counts to one.  The
 checked-in baseline therefore does not reserve or interrupt the host's occupied
-GPU.  Dependencies are pinned in `requirements.lock`; the validated runtime is
-Python 3.11, `newton==1.3.0`, `warp-lang==1.14.0`, and CPU.
+GPU.  Dependencies are pinned in `requirements.lock`; the target runtime is
+Python 3.11, `newton==1.3.0`, `warp-lang==1.14.0`, and CPU.  Consult a validation
+report tied to the same Git commit before treating a particular run as proven.
 
 The Franka asset is copied into the AgentPre cache from the configured existing
 Apache-2.0 `franka_description` tree.  `scripts/fetch_assets.py` parses the URDF,
 validates every referenced mesh, and records every referenced file in a SHA-256
 manifest.  It fails closed if the configured source is unavailable or the tree
 is incomplete.
+
+### Real Articraft microwave
+
+The external source checkouts and build environment are expected outside the
+repository at the following target-host paths; they are not created merely by
+cloning AgentPre:
+
+```text
+/cache/liluchen/articraft           # harness, pinned source commit
+/cache/liluchen/articraft-data      # sparse record checkout, pinned data commit
+/cache/liluchen/articraft-env       # independent Articraft Python environment
+```
+
+With both pinned external checkouts present, install their independent
+Python/uv environment under `/cache/liluchen`:
+
+```bash
+bash scripts/setup_articraft_env.sh
+```
+
+Then the build wrapper verifies both checkout commits, recompiles the record
+offline with validation and strict geometry QC, applies the checked-in inertial
+specification, runs AgentPre's asset inspector on the generated tree, and only
+then atomically materializes the accepted runtime files:
+
+```bash
+bash scripts/build_articraft_asset.sh
+```
+
+The checked-in
+`assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/inertials.json`
+has reviewed `state: ready` values for all five actual record links (`cabinet`,
+`door`, `turntable`, `selector_knob_0`, and `selector_knob_1`).  The values are
+deterministic simulation proxies derived from the pristine compiled URDF's
+per-link union collision AABB: COM is the AABB center, mass is AABB volume at an
+effective density of 300 kg/m^3 with a 0.02 kg floor, and inertia is the
+uniform-solid-box diagonal tensor about that center.  The specification records
+the source URDF SHA-256 as a structured field and records the reviewed AABBs,
+formula, and resulting values.  Injection rejects any pristine compiler output
+whose bytes do not match that SHA-256.  These are deliberately identified as
+collision-envelope proxies, not
+manufacturer-measured masses or CAD volume integrals; no value is inferred at
+runtime or hard-coded in Python.
+
+For a finalized specification, the equivalent postprocessing and
+materialization steps for an already-compiled record are:
+
+```bash
+python scripts/apply_articraft_inertials.py \
+  --urdf /cache/liluchen/articraft-data/cache/record_materialization/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/model.urdf \
+  --spec assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/inertials.json
+
+python scripts/materialize_articraft_asset.py \
+  --source-root /cache/liluchen/articraft-data/cache/record_materialization/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707 \
+  --inertial-spec assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/inertials.json \
+  --inertial-sidecar /cache/liluchen/articraft-data/cache/record_materialization/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/agentpre_inertial_completion.json
+```
+
+The injector requires the specification link set to match the pristine URDF's
+link and missing-inertial sets exactly.  A second run is idempotent only when
+all existing inertials match every JSON value.  Unknown/extra links, partially
+processed URDFs, non-positive mass, non-finite values, and non-positive-definite
+inertia matrices, physically unrealizable rigid-body tensors, and source-URDF
+hash drift are rejected before a write.  A per-URDF advisory lock covers the
+whole read/validate/commit transaction, and each file is atomically replaced in
+recoverable sidecar-first order: the stable
+`agentpre_inertial_completion.json` records the specification path/hash,
+pre/post URDF hashes, and injected link list, then the URDF is replaced.  An
+interruption before the URDF replacement can be retried from the still-pristine
+compiler output.
+
+The materializer independently reloads the strict specification, requires its
+record identity and data commit to match the requested asset, verifies every
+URDF inertial against it and the sidecar, inventories the runtime URDF/assets,
+and records the specification plus sidecar content and SHA-256 in
+the immutable manifest.  The sidecar and volatile upstream `compile_report.json`
+are provenance only and are not copied into the runtime asset.  Re-verifying
+identical assets does not rewrite the persisted manifest.  These helpers do not
+run the Articraft compiler or prove task-level acceptance by themselves.
+The sidecar's absolute paths and therefore its hash are stable for the fixed
+target layout documented above; changing root/cache overrides intentionally
+creates different provenance.
+Provenance, pinned commits, licenses, hinge geometry, and the authored
+`pull_grip_center` frame are recorded under
+`assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/`.
 
 ## Inspect and run
 
@@ -71,6 +161,16 @@ python -m src.asset_inspector assets/microwave/microwave.urdf \
   --door-joint door_hinge \
   --door-link microwave_door \
   --handle-link handle
+```
+
+Inspect the materialized Articraft record with its real names:
+
+```bash
+python -m src.asset_inspector \
+  /cache/liluchen/agentpre/assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707/model.urdf \
+  --door-joint door_hinge \
+  --door-link door \
+  --handle-link door
 ```
 
 Run the required deterministic mode:
@@ -87,6 +187,19 @@ Or use the wrapper:
 bash scripts/run_example.sh kinematic
 ```
 
+The wrapper's optional second argument selects another config, for example:
+
+```bash
+bash scripts/run_example.sh kinematic configs/articraft_microwave_franka.json
+bash scripts/run_example.sh physics_assisted configs/articraft_microwave_franka.json
+```
+
+Those Articraft commands require the external record to have been compiled,
+materialized at the configured cache path, and accepted by `asset_inspector`.
+The Git checkout contains its config and compact metadata, not the generated
+`model.urdf` or meshes, so cloning the repository alone is not enough to run
+that config.
+
 Run the measured Newton rollout with:
 
 ```bash
@@ -95,25 +208,34 @@ python -m src.run \
   --mode physics_assisted
 ```
 
-In `physics_assisted`, the kinematic result supplies the prescribed Franka link
-poses.  Robot bodies are marked kinematic with zero inverse mass and inertia;
-the driver writes only the explicitly resolved robot `body_q/body_qd` indices.
-It writes no robot generalized force.  Newton advances the articulated object,
-and the door coordinate is reconstructed from the measured Newton state with
-inverse kinematics.
+In `physics_assisted`, the kinematic result supplies name-resolved robot joint
+targets.  Franka bodies retain finite positive inverse mass and dynamic flags.
+An indexed Warp kernel writes position and finite-difference velocity targets
+only for the configured seven arm and two finger coordinates/DOFs; Newton XPBD
+applies the configured stiffness and damping.  The measured robot coordinates,
+door coordinate, TCP, and handle pose are reconstructed from the evolved body
+state with Newton inverse kinematics.  A configurable 0.02 rad IK control margin
+keeps PD tracking away from hard URDF joint limits while acceptance still checks
+the original limits with the configured numerical tolerance.
 
 A pre-authored fixed loop constraint, whose anchors encode the planned
 handle-frame-to-TCP relation, is enabled after `close` and released at
 `retreat`.  Immediately before activation, the measured relation must pass a
 15 mm / 7.5 degree gate; a remote or discontinuous latch is rejected.  The door
 reference trajectory is diagnostic only.  The implementation excludes the door
-coordinate and DOF from its indexed driver and performs no runtime write to the
-door position, velocity, target, or generalized force.  This is a static,
-indexed-control-path guarantee recorded in the artifacts, not a claim that a
-runtime write interceptor observed every possible external mutation.
+coordinate and DOF from the indexed target writer and performs no runtime write
+to the door position, velocity, position/velocity target, or generalized force.
+At model construction, configuration requires zero door position stiffness and
+zero target velocity; a positive velocity damping gain provides passive hinge
+damping without a position target.  Initial/final door target values are checked
+for exact equality.  These are static indexed-control-path guarantees recorded
+in the artifacts, not a claim that a runtime write interceptor observed every
+possible external mutation.
 
-Use `--output-dir /absolute/path` to select a particular run directory.  Without
-it, the CLI creates a run below the config's `output.root`.  Completed rollouts
+Use `--output-dir /absolute/path` to select a particular run directory.  The
+explicit path must be absent or empty; the CLI refuses to mix a new run with
+existing evidence.  Without it, the CLI creates a run below the config's
+`output.root`.  Completed rollouts
 use `success` or `acceptance_failed`; structural pipeline failures use `failed`
 and explicit codes such as `asset_invalid`, `frame_missing`, `ik_unreachable`,
 `joint_limit_violation`, `collision`, or `numerical_instability`.  The CLI exit
@@ -130,8 +252,10 @@ Each completed rollout writes:
 
 Physics-assisted kinematic reference artifacts are isolated below
 `kinematic_reference/`; they are never mixed with the measured physics
-trajectory at the run root.  An early structural failure guarantees a structured
-failure status but may occur before downstream rollout artifacts exist.
+trajectory at the run root.  The physics result fails closed unless that
+reference independently passes its configured acceptance gates.  An early
+structural failure guarantees a structured failure status but may occur before
+downstream rollout artifacts exist.
 
 The fixed seed is `20260714`.  The five phases are `pregrasp`, `approach`,
 `close`, `actuate`, and `retreat`.  During actuation, the door angle is sampled
@@ -147,6 +271,9 @@ gripper closing axis, approach axis, and recommended width.  If the requested
 frame is absent, the resolver extracts the configured handle link's geometry,
 generates deterministic AABB/PCA candidates, and retains all rejection reasons.
 Candidates pass configured reachability and collision checks before selection.
+The Articraft record intentionally uses an authored frame on the `door` link,
+because `pull_grip` is named geometry inside that link rather than an independent
+URDF link; falling back to AABB/PCA would incorrectly summarize the whole door.
 
 The deterministic kinematic collision backend uses sweep-and-prune over world
 AABBs followed by a 15-axis OBB separating-axis test.  The physics mode records
@@ -171,29 +298,51 @@ error below 10 degrees, no NaN/Inf, no joint-limit violations, no disallowed
 collision frames, final door angle within 3 degrees, and small handle-to-gripper
 drift throughout `close + actuate`.
 
-Run the complete dependency-light test suite with:
+Run the complete unittest suite in the configured project environment with:
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The authoritative remote validation evidence is recorded under `reports/` and
-points to the corresponding cached run directory rather than committing bulky
-runtime artifacts.
+`reports/` contains commit-specific validation snapshots and may describe an
+older controller or asset state.  A report is evidence only for the exact Git
+commit and cached run directory that it names; it must not be used to infer that
+newer unreported changes or the external Articraft config have passed.
 
 ## Periodic GitHub synchronization
 
 The sync script builds its commit from an isolated Git index and stages only
-source, configs, tests, documentation, and reports.  It refuses to run over
+the explicit project allowlist (`assets/`, `configs/`, `scripts/`, `src/`,
+`tests/`, `outputs/`, `reports/`, and the named top-level project files).
+`.gitignore` keeps `outputs/README.md` while excluding runtime output.  The
+script refuses to run over
 pre-existing staged work, rejects non-allowlisted paths and credential-like
 content, uses `flock` to prevent overlapping jobs, and leaves environments,
-cached assets, logs, NPZ files, and rollouts outside Git:
+cached assets, logs, NPZ files, and rollouts outside Git.  The first two commands
+below are mutating: the one-shot command commits and pushes, while installation
+starts the loop and performs its first sync immediately.
 
 ```bash
-bash scripts/sync_to_github.sh
-AGENTPRE_SYNC_INTERVAL_MINUTES=30 bash scripts/install_sync_cron.sh
+bash scripts/sync_to_github.sh       # one commit/push attempt
+bash scripts/install_sync_daemon.sh  # start loop; first attempt is immediate
+bash scripts/sync_daemon.sh status   # read current PID and heartbeat
+bash scripts/sync_daemon.sh stop     # stop without force-killing
 ```
 
+`sync_daemon.sh` is a user-owned, single-instance loop and does not depend on a
+system `cron` or `systemd` service.  Its PID, lock, heartbeat, and log live under
+`/cache/liluchen/agentpre`; it hides CUDA/ROCm and caps numerical-library thread
+counts even though the sync operation is Git-only.  The default interval is 30
+minutes.  Repeated `start` and `stop` calls are safe; `status` is read-only and
+exits 0 while running or 3 while stopped.  Before starting, the installer uses
+`crontab` when available to remove only the exact legacy AgentPre marker and its
+matching following sync command; isolated markers and all unrelated entries are
+preserved.  Absence of the
+`crontab` command does not block the user daemon.
+`scripts/install_sync_cron.sh` is a legacy alternative for a host with a
+confirmed active cron service: stop the user daemon first, and never install
+both schedulers concurrently.
+
 The default remote is
-`ssh://git@ssh.github.com:443/Da1suKE66/AgentPre.git`, which works on hosts where
-GitHub's standard SSH port is blocked.
+`ssh://git@ssh.github.com:443/Da1suKE66/AgentPre.git`, using GitHub's SSH endpoint
+on port 443 for hosts where the standard SSH port is blocked.
