@@ -1,6 +1,6 @@
 # AgentPre: deterministic microwave-door opening with Franka
 
-AgentPre compiles an articulated microwave task into a deterministic five-phase
+AgentPre compiles an articulated microwave task into a deterministic six-phase
 trajectory and solves it with Newton 1.3's analytic Levenberg-Marquardt IK.  It
 also has a CPU-only `physics_assisted` mode: dynamic Franka bodies track the IK
 trajectory through Newton XPBD joint position/velocity PD targets while Newton
@@ -215,14 +215,29 @@ only for the configured seven arm and two finger coordinates/DOFs; Newton XPBD
 applies the configured stiffness and damping.  The measured robot coordinates,
 door coordinate, TCP, and handle pose are reconstructed from the evolved body
 state with Newton inverse kinematics.  A configurable 0.02 rad IK control margin
-keeps PD tracking away from hard URDF joint limits while acceptance still checks
-the original limits with the configured numerical tolerance.
+keeps the reference away from hard URDF joint limits.  Before the expensive
+physics rollout starts, an independent 0.05 rad arm tracking-reserve audit
+checks the complete reference against the original URDF limits and rejects any
+sample that touches a realized float32 control boundary or lacks the configured
+hard-limit clearance.  Measured physics acceptance still checks the original
+limits with the configured numerical tolerance.
+Both checked-in configs use a 1/60 s control interval, 48 physics substeps,
+64 solver iterations, arm stiffness/damping 650/200, and finger
+stiffness/damping 300/40.
 
-A pre-authored fixed loop constraint, whose anchors encode the planned
-handle-frame-to-TCP relation, is enabled after `close` and released at
-`retreat`.  Immediately before activation, the measured relation must pass a
-15 mm / 7.5 degree gate; a remote or discontinuous latch is rejected.  The door
-reference trajectory is diagnostic only.  The implementation excludes the door
+A fixed loop grasp aid is enabled after `close`, remains active through
+`actuate` and `release`, and is disabled before the first `retreat` frame.
+For the checked-in schedule it activates at frame 392, remains active on
+`[392, 1240)`, and is disabled at frame 1240.
+Immediately before activation, the measured relation must pass a planned
+15 mm / 7.5 degree pose gate and a 0.01 m/s / 5 degree/s relative anchor-twist
+gate; a remote, moving, or discontinuous latch is rejected.  Only after those
+gates pass does the runtime capture a coincident parent anchor from the measured
+hand/handle poses.  The finalized child anchor, captured parent anchor, and all
+initial-disable, activation-enable, and first-retreat-disable joint-enabled
+transactions are each written once and read back.  The captured parent anchor
+is also read back and checked for post-capture coincidence.  The
+door reference trajectory is diagnostic only.  The implementation excludes the door
 coordinate and DOF from the indexed target writer and performs no runtime write
 to the door position, velocity, position/velocity target, or generalized force.
 At model construction, configuration requires zero door position stiffness and
@@ -257,12 +272,70 @@ reference independently passes its configured acceptance gates.  An early
 structural failure guarantees a structured failure status but may occur before
 downstream rollout artifacts exist.
 
-The fixed seed is `20260714`.  The five phases are `pregrasp`, `approach`,
-`close`, `actuate`, and `retreat`.  During actuation, the door angle is sampled
-uniformly, object FK gives the handle pose, and a fixed handle-to-gripper
-transform generates the Cartesian target.  Sequential IK warm-starts each
-waypoint from the previous solution and independently validates the result with
-fresh FK, finite-value checks, and URDF joint limits.
+The fixed seed is `20260714`.  The six phases are `pregrasp`, `approach`,
+`close`, `actuate`, `release`, and `retreat`.  During actuation, the door angle
+is sampled with quintic smoothstep timing, object FK gives the handle pose, and
+a fixed handle-to-gripper transform generates the Cartesian target.  Release
+holds the goal door, handle, and TCP poses fixed while opening the fingers with
+the same quintic timing; only after that does retreat move the open gripper away
+from the handle.  The checked-in schedules use 224, 72, 96, 800, 48, and 96
+samples respectively, for 1336 stored right-endpoint frames: `pregrasp`
+0--223, `approach` 224--295, `close` 296--391, `actuate` 392--1191,
+`release` 1192--1239, and `retreat` 1240--1335.  The longer close phase lowers
+the finger contact speed so a one-sided contact stop remains inside the measured
+finger-jerk gate.  The grasp offset keeps its
+position unchanged and adds a +15 degree roll about the gripper's local closing
+axis: `wxyz = [0.5609855268, -0.4304593346, -0.5609855268, -0.4304593346]`.
+This keeps the late-actuation q4 reference away from its hard
+lower limit without weakening the IK or physics gates.  Sequential IK
+warm-starts each waypoint from the
+previous solution and independently validates the result with fresh FK,
+finite-value checks, and URDF joint limits.
+
+Every stored frame is the right endpoint of one control interval; the explicit
+time-zero state is the configured nominal arm pose with an open gripper, zero
+joint velocity, and zero joint acceleration.  Each task phase uses a quintic
+smoothstep so its continuous velocity and acceleration vanish at both ends.
+Ordered IK solves add a previous-state objective and then project the Newton
+candidate onto the intersection of the control-position range, each joint's
+URDF velocity limit, the configured arm acceleration limit, and the configured
+arm jerk limit.  Projection is resolved on the actual float32 grid used by
+Newton; the same quantized state is used for FK, output, and the next frame.
+Numerically identical Cartesian hold targets (including sign-equivalent unit
+quaternions) skip a second LM update, so the nominal-posture objective cannot
+drift through Franka's null space during `close` or `release`; the same hard
+motion projector first dissipates any residual velocity/acceleration and then
+holds the realized float32 joint state exactly.
+Independent one-pose grasp-candidate checks do not enable the temporal
+continuity objective.
+
+Acceptance includes nominal-to-frame-zero finite differences and hard gates for
+per-joint URDF velocity utilization, arm acceleration, and arm jerk.  Physics
+command preflight additionally checks prismatic finger acceleration/jerk in SI
+units, float32 target velocities, and two virtual terminal holds that return the
+command to zero velocity and then zero acceleration.  The measured physics
+result is separately gated using Newton's post-step, name-resolved arm and
+finger `joint_qd`: both groups must remain within their URDF velocity limits;
+the checked-in arm acceleration/jerk limits are 7.5 rad/s² and 450 rad/s³,
+and the finger limits are 1.5 m/s² and 30 m/s³.  Dynamic
+overshoot therefore cannot be hidden by smooth endpoint positions.
+Acceleration and jerk reconstructed from adjacent `joint_q` samples remain in
+the artifacts as diagnostics, but are not physics acceptance gates because
+Newton inverse-coordinate reconstruction can change an equivalent generalized
+coordinate representation while the authoritative `joint_qd` stays continuous.
+Raw-to-projected IK motion diagnostics and measured arm/finger velocities are
+retained in the rollout and trajectory artifacts.
+
+The fixed grasp remains active through `release`.  At frame 1191 the runtime
+captures the measured float32 arm equilibrium.  Over frames 1192--1239 the
+applied PD target is unloaded from the planned hold to that equilibrium with an
+endpoint-exact quintic blend.  The constraint is disabled at frame 1240, whose
+applied target is bit-identical to the preceding release endpoint; frames
+1240--1271 then blend back into the planned retreat.  These applied targets and
+their finite-difference velocities are serialized alongside the unmodified
+planned IK reference and are re-audited, before use, against hard position
+limits, the 0.05 rad tracking reserve/control endpoints, velocity, acceleration,
+and jerk limits.
 
 ## Affordances and collision policy
 
@@ -296,7 +369,10 @@ Acceptance thresholds live only in the JSON config.  The checked-in gates requir
 at least 95% IK success, median position error below 2 cm, median orientation
 error below 10 degrees, no NaN/Inf, no joint-limit violations, no disallowed
 collision frames, final door angle within 3 degrees, and small handle-to-gripper
-drift throughout `close + actuate`.
+drift throughout `close + actuate + release`.  Physics mode additionally
+requires the full reference-reserve audit, measured arm/finger velocity,
+acceleration, and jerk gates, and successful fixed-joint capture/release
+transactions with their readbacks.
 
 Run the complete unittest suite in the configured project environment with:
 

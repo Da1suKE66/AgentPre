@@ -1,4 +1,4 @@
-"""Deterministic five-phase door-opening target generation."""
+"""Deterministic six-phase door-opening target generation."""
 
 from __future__ import annotations
 
@@ -42,6 +42,22 @@ def interpolate_transform(start: np.ndarray, end: np.ndarray, amount: float) -> 
     return pose_matrix(position, quaternion)
 
 
+def _phase_amount(index: int, count: int) -> float:
+    """Return C2-continuous progress for a phase sample.
+
+    Phase samples include the phase endpoint but not its explicit start.  The
+    preceding phase's final sample supplies that start, so evaluating the
+    quintic smoothstep at ``(index + 1) / count`` preserves the shared endpoint
+    while giving every phase zero velocity and acceleration at both ends.
+    """
+
+    linear_amount = float(index + 1) / float(count)
+    linear_amount = float(np.clip(linear_amount, 0.0, 1.0))
+    return linear_amount**3 * (
+        10.0 + linear_amount * (-15.0 + 6.0 * linear_amount)
+    )
+
+
 @dataclass(frozen=True)
 class TaskPlan:
     phase_names: np.ndarray
@@ -80,7 +96,7 @@ def generate_task_plan(
     closed_gripper_width_m: float,
     dt: float,
 ) -> TaskPlan:
-    """Build pregrasp, approach, close, actuate, and retreat targets.
+    """Build pregrasp, approach, close, actuate, release, and retreat targets.
 
     ``handle_approach_axis`` is expressed in the handle frame and points in the
     direction travelled from pregrasp toward the handle. Therefore pregrasp
@@ -116,7 +132,7 @@ def generate_task_plan(
 
     count = int(phase_samples["pregrasp"])
     for index in range(count):
-        amount = float(index + 1) / float(count)
+        amount = _phase_amount(index, count)
         add(
             "pregrasp",
             closed_angle_rad,
@@ -126,7 +142,7 @@ def generate_task_plan(
 
     count = int(phase_samples["approach"])
     for index in range(count):
-        amount = float(index + 1) / float(count)
+        amount = _phase_amount(index, count)
         add(
             "approach",
             closed_angle_rad,
@@ -136,31 +152,37 @@ def generate_task_plan(
 
     count = int(phase_samples["close"])
     for index in range(count):
-        amount = float(index + 1) / float(count)
+        amount = _phase_amount(index, count)
         width = (1.0 - amount) * open_gripper_width_m + amount * closed_gripper_width_m
         add("close", closed_angle_rad, closed_grasp, width)
 
     count = int(phase_samples["actuate"])
     for index in range(count):
-        amount = float(index + 1) / float(count)
+        amount = _phase_amount(index, count)
         angle = (1.0 - amount) * closed_angle_rad + amount * goal_angle_rad
         handle = kinematics.handle_frame_transform(angle, link_to_handle_frame)
         add("actuate", angle, compose_transforms(handle, handle_to_gripper), closed_gripper_width_m)
 
     final_handle = kinematics.handle_frame_transform(goal_angle_rad, link_to_handle_frame)
     final_grasp = compose_transforms(final_handle, handle_to_gripper)
+
+    count = int(phase_samples["release"])
+    for index in range(count):
+        amount = _phase_amount(index, count)
+        width = (1.0 - amount) * closed_gripper_width_m + amount * open_gripper_width_m
+        add("release", goal_angle_rad, final_grasp, width)
+
     final_axis_world = final_handle[:3, :3] @ axis
     retreat = final_grasp.copy()
     retreat[:3, 3] -= final_axis_world * float(retreat_distance_m)
     count = int(phase_samples["retreat"])
     for index in range(count):
-        amount = float(index + 1) / float(count)
-        width = (1.0 - amount) * closed_gripper_width_m + amount * open_gripper_width_m
+        amount = _phase_amount(index, count)
         add(
             "retreat",
             goal_angle_rad,
             interpolate_transform(final_grasp, retreat, amount),
-            width,
+            open_gripper_width_m,
         )
 
     names = np.asarray(phase_names, dtype="U16")
@@ -168,10 +190,11 @@ def generate_task_plan(
     return TaskPlan(
         phase_names=names,
         phase_indices=indices,
-        time_s=np.arange(len(names), dtype=float) * float(dt),
+        # Every stored target is the right endpoint of one control interval;
+        # the explicit t=0 state is the configured nominal robot pose.
+        time_s=(np.arange(len(names), dtype=float) + 1.0) * float(dt),
         door_angle_rad=np.asarray(door_angles, dtype=float),
         handle_world=np.stack(handle_world),
         target_gripper_world=np.stack(gripper_world),
         gripper_width_m=np.asarray(widths, dtype=float),
     )
-

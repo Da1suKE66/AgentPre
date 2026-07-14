@@ -9,7 +9,7 @@ import unittest
 
 import numpy as np
 
-from src.config import load_config, validate_config
+from src.config import PHASE_ORDER, load_config, validate_config
 from src.errors import FailureCode, PipelineError
 from src.output import write_json, write_jsonl, write_trajectory
 
@@ -42,6 +42,35 @@ class ConfigOutputTests(unittest.TestCase):
                     os.environ.pop("AGENTPRE_CACHE_ROOT", None)
                 else:
                     os.environ["AGENTPRE_CACHE_ROOT"] = old
+
+    def test_all_six_phase_sample_counts_are_required_positive_integers(self) -> None:
+        self.assertEqual(
+            PHASE_ORDER,
+            ("pregrasp", "approach", "close", "actuate", "release", "retreat"),
+        )
+        self.assertEqual(tuple(self.data["task"]["phases"]), PHASE_ORDER)
+        for phase in PHASE_ORDER:
+            self.assertGreater(self.data["task"]["phases"][phase]["samples"], 0)
+            for invalid_value in (0, -1, 1.5, True):
+                with self.subTest(phase=phase, value=invalid_value):
+                    invalid = copy.deepcopy(self.data)
+                    invalid["task"]["phases"][phase]["samples"] = invalid_value
+                    with self.assertRaises(PipelineError) as caught:
+                        validate_config(invalid)
+                    self.assertEqual(caught.exception.code, FailureCode.CONFIG_INVALID)
+
+        missing = copy.deepcopy(self.data)
+        del missing["task"]["phases"]["release"]
+        with self.assertRaises(PipelineError) as caught:
+            validate_config(missing)
+        self.assertEqual(caught.exception.code, FailureCode.CONFIG_INVALID)
+
+        extra = copy.deepcopy(self.data)
+        extra["task"]["phases"]["pause"] = {"samples": 1}
+        with self.assertRaises(PipelineError) as caught:
+            validate_config(extra)
+        self.assertEqual(caught.exception.code, FailureCode.CONFIG_INVALID)
+        self.assertEqual(caught.exception.details["extra"], ["pause"])
 
     def test_asset_hashes_are_required_lowercase_sha256(self) -> None:
         for kind in ("object", "robot"):
@@ -115,6 +144,45 @@ class ConfigOutputTests(unittest.TestCase):
         control = self.data["simulation"]["robot_control"]
         self.assertEqual(control["implementation"], "newton_xpbd_joint_targets")
         self.assertEqual(control["target_velocity_mode"], "finite_difference")
+        self.assertEqual(control["arm_joint_tracking_reserve_rad"], 0.05)
+        self.assertEqual(control["grasp_release_blend_frames"], 32)
+        for invalid_value in (0, 1, -1, 2.5, True):
+            with self.subTest(
+                field="grasp_release_blend_frames", value=invalid_value
+            ):
+                invalid = copy.deepcopy(self.data)
+                invalid["simulation"]["robot_control"][
+                    "grasp_release_blend_frames"
+                ] = invalid_value
+                with self.assertRaises(PipelineError) as caught:
+                    validate_config(invalid)
+                self.assertEqual(caught.exception.code, FailureCode.CONFIG_INVALID)
+        missing_blend = copy.deepcopy(self.data)
+        del missing_blend["simulation"]["robot_control"][
+            "grasp_release_blend_frames"
+        ]
+        with self.assertRaises(PipelineError) as caught:
+            validate_config(missing_blend)
+        self.assertEqual(caught.exception.code, FailureCode.CONFIG_INVALID)
+        for invalid_value in (0.0, -0.1, True, float("nan"), float("inf")):
+            with self.subTest(
+                field="arm_joint_tracking_reserve_rad",
+                value=invalid_value,
+            ):
+                invalid = copy.deepcopy(self.data)
+                invalid["simulation"]["robot_control"][
+                    "arm_joint_tracking_reserve_rad"
+                ] = invalid_value
+                with self.assertRaises(PipelineError) as caught:
+                    validate_config(invalid)
+                self.assertEqual(caught.exception.code, FailureCode.CONFIG_INVALID)
+        missing_reserve = copy.deepcopy(self.data)
+        del missing_reserve["simulation"]["robot_control"][
+            "arm_joint_tracking_reserve_rad"
+        ]
+        with self.assertRaises(PipelineError) as caught:
+            validate_config(missing_reserve)
+        self.assertEqual(caught.exception.code, FailureCode.CONFIG_INVALID)
         for name in (
             "arm_stiffness",
             "arm_damping",
@@ -131,6 +199,25 @@ class ConfigOutputTests(unittest.TestCase):
         invalid["ik"]["control_limit_margin_rad"] = 0.0
         with self.assertRaises(PipelineError):
             validate_config(invalid)
+
+        self.assertGreater(self.data["ik"]["continuity_weight"], 0.0)
+        invalid = copy.deepcopy(self.data)
+        invalid["ik"]["continuity_weight"] = 0.0
+        with self.assertRaises(PipelineError):
+            validate_config(invalid)
+
+        for name in (
+            "max_joint_velocity_limit_ratio",
+            "max_joint_acceleration_rad_s2",
+            "max_joint_jerk_rad_s3",
+            "max_finger_acceleration_m_s2",
+            "max_finger_jerk_m_s3",
+        ):
+            self.assertGreater(self.data["thresholds"][name], 0.0)
+            invalid = copy.deepcopy(self.data)
+            invalid["thresholds"][name] = 0.0
+            with self.assertRaises(PipelineError):
+                validate_config(invalid)
 
         door_control = self.data["simulation"]["door_control"]
         self.assertEqual(door_control["backend"], "passive_velocity_damping")
@@ -150,6 +237,20 @@ class ConfigOutputTests(unittest.TestCase):
         with self.assertRaises(PipelineError):
             validate_config(invalid)
 
+        for name in (
+            "activation_position_tolerance_m",
+            "activation_orientation_tolerance_deg",
+            "activation_linear_velocity_tolerance_m_s",
+            "activation_angular_velocity_tolerance_deg_s",
+        ):
+            self.assertGreater(
+                self.data["simulation"]["fixed_grasp_constraint"][name], 0.0
+            )
+            invalid = copy.deepcopy(self.data)
+            invalid["simulation"]["fixed_grasp_constraint"][name] = 0.0
+            with self.assertRaises(PipelineError):
+                validate_config(invalid)
+
     def test_articraft_record_may_attach_handle_frame_to_door_link(self) -> None:
         record = copy.deepcopy(self.data)
         door_link = record["assets"]["object"]["door_link"]
@@ -164,6 +265,12 @@ class ConfigOutputTests(unittest.TestCase):
 
     def test_checked_in_articraft_record_config_and_affordance_are_consistent(self) -> None:
         config = load_config(ROOT / "configs/articraft_microwave_franka.json")
+        self.assertEqual(
+            config.get(
+                "simulation.robot_control.arm_joint_tracking_reserve_rad"
+            ),
+            0.05,
+        )
         affordance_path = config.resolve_path(
             config.get("assets.object.affordances")
         )
