@@ -159,13 +159,26 @@ Provenance, pinned commits, licenses, hinge geometry, and the authored
 For an already materialized articulated microwave URDF, the upper Agent can
 perform the complete task-level workflow without per-frame hand tuning:
 
-1. infer and rank the door joint, door link, and handle geometry;
-2. create a precise handle affordance frame and align it to the Franka workspace;
-3. freeze the source hashes, inferred decisions, confidence, policy, and generated
+1. preserve the source URDF and, only when links lack inertials, create a
+   workspace-local simulation copy with deterministic collision-AABB proxy inertials;
+2. infer and rank the door joint, door link, and handle geometry;
+3. create a precise handle affordance frame and align it to the Franka workspace;
+4. freeze the source/runtime hashes, proxy provenance, inferred decisions,
+   confidence, policy, and generated
    low-level config in `agent_manifest.json`;
-4. try the bounded workspace-offset candidates in kinematic mode; and
-5. optionally run `physics_assisted` once, using only the first accepted
+5. try the bounded workspace-offset candidates in kinematic mode; and
+6. optionally run `physics_assisted` once, using only the first accepted
    kinematic candidate.
+
+Proxy inertials use the same documented policy as the reviewed Articraft
+asset: union collision AABB center, 300 kg/m^3 effective density with a 0.02 kg
+mass floor, and a uniform-solid-box diagonal tensor.  Visual geometry is used
+only for a link with no collision geometry.  Relative mesh paths are frozen to
+their resolved local files in the prepared copy.  The source file is never
+modified, and `proxy_inertials.json` records both hashes, every generated link,
+geometry bounds, sources, mass, and tensor.  These are explicitly simulation
+proxies rather than manufacturer measurements; a link with no usable geometry
+still fails closed.
 
 Prepare without executing:
 
@@ -174,6 +187,22 @@ agentpre-agent prepare \
   --articraft-record /cache/liluchen/agentpre/assets/articraft/rec_microwave_oven_5e86f3429e954dcd9ab6c9d3a94db707 \
   --workdir /cache/liluchen/agentpre/agent-runs/microwave-001
 ```
+
+The blind end-to-end form needs no door, handle, goal-angle, object-pose, or
+trajectory override:
+
+```bash
+agentpre-agent run \
+  --urdf /path/to/materialized/model.urdf \
+  --robot-urdf /cache/liluchen/agentpre/assets/franka_description/robots/panda_arm_hand.urdf \
+  --workdir /cache/liluchen/agentpre/agent-runs/new-appliance \
+  --with-physics
+```
+
+This automatic preparation applies to an articulated URDF whose joints and
+per-link geometry already exist.  A single raw mesh still does not reveal where
+the door hinge is, how the mesh should be split into links, or what joint limits
+are safe, so raw-mesh-to-articulation remains a separate asset-authoring task.
 
 Or run the bounded automatic search and the measured physics rollout:
 

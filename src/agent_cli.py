@@ -2,7 +2,8 @@
 
 The low-level :mod:`src.run` command deliberately requires a complete audited
 configuration.  This module is the small decision layer above it: resolve a
-URDF or materialized Articraft record, infer task semantics, emit a reviewable
+URDF or materialized Articraft record, prepare a workspace-local simulation
+copy when inertials are absent, infer task semantics, emit a reviewable
 configuration/manifest, and execute that frozen configuration on request.
 
 ``prepare`` never starts IK or physics.  ``execute`` never re-infers semantics;
@@ -37,6 +38,7 @@ from .animation import write_animation_html
 from .config import validate_config
 from .door_kinematics import forward_kinematics
 from .output import write_json
+from .proxy_inertials import ProxyInertialError, prepare_proxy_inertials
 from .urdf_model import URDFModel, URDFModelError, load_urdf
 
 
@@ -289,6 +291,72 @@ def resolve_source(
         "metadata_path": metadata_path,
         "metadata": metadata,
     }
+
+
+def _prepare_runtime_source(
+    source: MutableMapping[str, Any],
+    *,
+    workspace: Path,
+) -> None:
+    """Create a non-destructive proxy-inertial copy only when links need it."""
+
+    source_urdf = source["urdf"]
+    assert isinstance(source_urdf, Path)
+    source_hash = str(source["urdf_sha256"])
+    source["source_urdf"] = source_urdf
+    source["source_urdf_sha256"] = source_hash
+    try:
+        model = load_urdf(source_urdf)
+    except URDFModelError:
+        # Preserve the existing structured URDF failure path in semantic or
+        # asset inspection rather than disguising it as an inertial failure.
+        source["asset_preparation"] = {
+            "schema_version": 1,
+            "method": "none",
+            "reason": "source_urdf_not_parseable",
+            "source_urdf": str(source_urdf),
+            "source_urdf_sha256": source_hash,
+        }
+        return
+
+    missing = sorted(
+        link.name for link in model.links.values() if link.inertial is None
+    )
+    if not missing:
+        source["asset_preparation"] = {
+            "schema_version": 1,
+            "method": "none",
+            "reason": "all_links_already_have_inertials",
+            "source_urdf": str(source_urdf),
+            "source_urdf_sha256": source_hash,
+            "missing_links": [],
+        }
+        return
+
+    prepared_root = workspace / "prepared_asset"
+    prepared_urdf = prepared_root / "model.proxy-inertial.urdf"
+    provenance_path = prepared_root / "proxy_inertials.json"
+    try:
+        result = prepare_proxy_inertials(source_urdf, prepared_urdf)
+    except ProxyInertialError as exc:
+        details = (
+            exc.to_dict()
+            if callable(getattr(exc, "to_dict", None))
+            else {"exception_type": type(exc).__name__, "error": str(exc)}
+        )
+        raise AgentError(
+            "proxy_inertial_preparation_failed",
+            "missing URDF inertials could not be derived from local geometry",
+            stage="asset_preparation",
+            details={"missing_links": missing, "failure": details},
+        ) from exc
+    provenance = result.to_dict()
+    provenance["provenance_path"] = str(provenance_path)
+    write_json(provenance_path, provenance)
+    provenance["provenance_sha256"] = _sha256(provenance_path)
+    source["urdf"] = result.output_urdf.resolve()
+    source["urdf_sha256"] = _sha256(result.output_urdf)
+    source["asset_preparation"] = provenance
 
 
 def _descendants(model: URDFModel, root: str) -> set[str]:
@@ -864,6 +932,7 @@ def prepare_workspace(
         policy_path, policy_data = _load_policy(policy)
         template_path = template.expanduser().resolve() if template is not None else _policy_base_config(policy_path, policy_data)
         source = resolve_source(urdf=urdf, articraft_record=articraft_record)
+        _prepare_runtime_source(source, workspace=workspace)
         decisions, semantic_metadata = infer_semantic_decisions(
             source["urdf"],
             provider=semantic_provider,
@@ -1250,6 +1319,9 @@ def prepare_workspace(
                 "metadata_path": str(source["metadata_path"]) if source.get("metadata_path") else None,
                 "resolved_urdf": str(source["urdf"]),
                 "urdf_sha256": source["urdf_sha256"],
+                "source_urdf": str(source["source_urdf"]),
+                "source_urdf_sha256": source["source_urdf_sha256"],
+                "asset_preparation": copy.deepcopy(source["asset_preparation"]),
             },
             "semantic_inference": {
                 "provider": semantic_metadata["provider"],
@@ -1266,6 +1338,10 @@ def prepare_workspace(
                 "affordances": {"path": str(affordance_path), "sha256": _sha256(affordance_path)},
                 "manifest": {"path": str(manifest_path)},
                 "policy": {"path": str(policy_path), "sha256": _sha256(policy_path)},
+                "runtime_urdf": {
+                    "path": str(source["urdf"]),
+                    "sha256": source["urdf_sha256"],
+                },
                 "run_root": str(workspace / "runs"),
             },
             "executions": [],

@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -141,6 +142,45 @@ class AgentCliTests(unittest.TestCase):
             )
             self.assertNotIn("door", config["collision"]["allowed_contact_links"])
             self.assertIn("microwave_door", config["collision"]["allowed_contact_links"])
+
+    def test_prepare_derives_workspace_local_proxy_inertials_without_mutating_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            urdf = self._isolated_fixture(root)
+            tree = ET.parse(urdf)
+            for link in tree.getroot().findall("link"):
+                inertial = link.find("inertial")
+                if inertial is not None:
+                    link.remove(inertial)
+            tree.write(urdf, encoding="unicode")
+            source_bytes = urdf.read_bytes()
+            source_hash = _sha256(urdf)
+            workspace = root / "proxy-job"
+
+            outcome = prepare_workspace(
+                workspace=workspace,
+                urdf=urdf,
+                semantic_provider=self._provider(),
+            )
+
+            self.assertTrue(outcome.success, outcome.failure)
+            self.assertEqual(urdf.read_bytes(), source_bytes)
+            config = json.loads((workspace / CONFIG_NAME).read_text(encoding="utf-8"))
+            runtime_urdf = Path(config["assets"]["object"]["urdf"])
+            self.assertNotEqual(runtime_urdf, urdf.resolve())
+            self.assertTrue(runtime_urdf.is_file())
+            runtime_root = ET.parse(runtime_urdf).getroot()
+            self.assertTrue(runtime_root.findall("link"))
+            self.assertTrue(
+                all(link.find("inertial") is not None for link in runtime_root.findall("link"))
+            )
+            manifest = json.loads((workspace / MANIFEST_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["input"]["source_urdf"], str(urdf.resolve()))
+            self.assertEqual(manifest["input"]["source_urdf_sha256"], source_hash)
+            self.assertNotEqual(manifest["input"]["asset_preparation"]["method"], "none")
+            self.assertEqual(
+                manifest["artifacts"]["runtime_urdf"]["path"], str(runtime_urdf)
+            )
 
     def test_same_link_handle_uses_provider_frame_instead_of_door_geometry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
