@@ -199,6 +199,24 @@ agentpre-agent run \
   --with-physics
 ```
 
+The lightweight `animation.html` intentionally shows body/TCP trajectories.
+To export actual URDF visual geometry from the measured Newton body poses as a
+1280x720 H.264 video, use the CUDA ray-traced camera exporter:
+
+```bash
+AGENTPRE_CUDA_VISIBLE_DEVICES=0 python -m src.render_video \
+  --workdir /cache/liluchen/agentpre/agent-runs/new-appliance \
+  --output /cache/liluchen/agentpre/agent-runs/new-appliance/physics_mesh.mp4 \
+  --width 1280 --height 720 --fps 30
+```
+
+The exporter renders every URDF visual shape, replays `body_pose_wxyz`
+directly rather than reconstructing motion with FK, refits the moving-shape BVH
+on every source frame, and writes closed/open PNG keyframes plus a render
+provenance JSON beside the MP4.  The default 30 FPS export samples every second
+frame of the measured 60 Hz trajectory, preserving the 22.27 s duration without
+interpolating motion.
+
 This automatic preparation applies to an articulated URDF whose joints and
 per-link geometry already exist.  A single raw mesh still does not reveal where
 the door hinge is, how the mesh should be split into links, or what joint limits
