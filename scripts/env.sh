@@ -12,8 +12,13 @@ export WARP_CACHE_PATH="${AGENTPRE_CACHE_ROOT}/warp-cache"
 export NEWTON_CACHE_PATH="${AGENTPRE_CACHE_ROOT}/newton-cache"
 export TMPDIR="${AGENTPRE_CACHE_ROOT}/tmp"
 
-# The host GPU is occupied and its driver is older than Newton 1.3's minimum.
-export CUDA_VISIBLE_DEVICES=""
+# CPU configs clear CUDA visibility inside src.run. CUDA configs preserve the
+# container runtime mapping unless an explicit shared-host selection is given.
+if [[ -n "${AGENTPRE_CUDA_VISIBLE_DEVICES:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES="${AGENTPRE_CUDA_VISIBLE_DEVICES}"
+elif [[ -z "${CUDA_VISIBLE_DEVICES+x}" ]]; then
+  unset CUDA_VISIBLE_DEVICES
+fi
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1

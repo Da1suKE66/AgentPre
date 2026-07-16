@@ -266,8 +266,13 @@ def _configure_deterministic_runtime(config: ProjectConfig) -> None:
         "NUMEXPR_NUM_THREADS",
     ):
         os.environ[variable] = threads
-    if str(config.get("runtime.device")).lower() == "cpu":
+    runtime_device = str(config.get("runtime.device")).lower()
+    if runtime_device == "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    elif os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+        # An empty selector hides every GPU. CUDA configs should fall back to
+        # the container runtime's NVIDIA_VISIBLE_DEVICES mapping instead.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     seed = int(config.get("seed"))
     random.seed(seed)
     np.random.seed(seed)
@@ -465,6 +470,50 @@ def _arm_joint_limits(config: ProjectConfig) -> tuple[np.ndarray, np.ndarray]:
         lower.append(float(joint.limit.lower))
         upper.append(float(joint.limit.upper))
     return np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
+
+
+def _arm_joint_velocity_limits(config: ProjectConfig) -> np.ndarray:
+    """Resolve positive URDF velocity limits in configured arm-joint order."""
+
+    robot_path = config.asset_path("robot")
+    if not robot_path.is_file():
+        raise PipelineError(
+            FailureCode.ASSET_MISSING,
+            f"robot URDF does not exist: {robot_path}",
+            stage="robot_asset",
+            details={"path": str(robot_path)},
+        )
+    try:
+        model = load_urdf(robot_path)
+    except URDFModelError as exc:
+        raise PipelineError(
+            FailureCode.ASSET_INVALID,
+            "robot URDF cannot be parsed",
+            stage="robot_asset",
+            details=exc.to_dict(),
+        ) from exc
+
+    velocity: list[float] = []
+    for joint_name in config.get("assets.robot.arm_joint_names"):
+        try:
+            joint = model.require_joint(str(joint_name))
+        except URDFModelError as exc:
+            raise PipelineError(
+                FailureCode.ASSET_INVALID,
+                "configured arm joint is absent from the robot URDF",
+                stage="robot_asset",
+                details=exc.to_dict(),
+            ) from exc
+        limit = None if joint.limit is None else joint.limit.velocity
+        if limit is None or not math.isfinite(float(limit)) or float(limit) <= 0.0:
+            raise PipelineError(
+                FailureCode.ASSET_INVALID,
+                "configured arm joint has no finite positive URDF velocity limit",
+                stage="robot_asset",
+                details={"joint": joint.name, "velocity": limit},
+            )
+        velocity.append(float(limit))
+    return np.asarray(velocity, dtype=float)
 
 
 def _candidate_target(
@@ -790,6 +839,153 @@ def _joint_violation_row(item: Any) -> dict[str, Any]:
     }
 
 
+def _joint_velocity_violation_row(item: Any) -> dict[str, Any]:
+    """Serialize the optimizer's pre-projection velocity violation."""
+
+    return {
+        "dof_index": int(getattr(item, "dof_index")),
+        "coord_index": int(getattr(item, "coord_index")),
+        "previous": _finite_or_none(getattr(item, "previous")),
+        "candidate": _finite_or_none(getattr(item, "candidate")),
+        "delta": _finite_or_none(getattr(item, "delta")),
+        "max_delta": _finite_or_none(getattr(item, "max_delta")),
+        "requested_velocity": _finite_or_none(
+            getattr(item, "requested_velocity")
+        ),
+        "velocity_limit": _finite_or_none(getattr(item, "velocity_limit")),
+        "requested_to_limit_ratio": _finite_or_none(
+            getattr(item, "limit_ratio")
+        ),
+    }
+
+
+def _motion_projection_diagnostic_row(item: Any) -> dict[str, Any]:
+    """Serialize one raw-to-float32-realized motion projection."""
+
+    return {
+        "dof_index": int(getattr(item, "dof_index")),
+        "coord_index": int(getattr(item, "coord_index")),
+        "raw_candidate_q": _finite_or_none(getattr(item, "raw_candidate_q")),
+        "projected_q": _finite_or_none(getattr(item, "projected_q")),
+        "q_correction_rad": _finite_or_none(
+            getattr(item, "q_correction_rad")
+        ),
+        "raw_requested_velocity_rad_s": _finite_or_none(
+            getattr(item, "raw_requested_velocity_rad_s")
+        ),
+        "raw_requested_acceleration_rad_s2": _finite_or_none(
+            getattr(item, "raw_requested_acceleration_rad_s2")
+        ),
+        "raw_requested_jerk_rad_s3": _finite_or_none(
+            getattr(item, "raw_requested_jerk_rad_s3")
+        ),
+        "projected_velocity_rad_s": _finite_or_none(
+            getattr(item, "projected_velocity_rad_s")
+        ),
+        "projected_acceleration_rad_s2": _finite_or_none(
+            getattr(item, "projected_acceleration_rad_s2")
+        ),
+        "projected_jerk_rad_s3": _finite_or_none(
+            getattr(item, "projected_jerk_rad_s3")
+        ),
+        "trigger_reasons": [
+            str(reason) for reason in getattr(item, "trigger_reasons", ())
+        ],
+    }
+
+
+def _ik_motion_diagnostics(waypoints: Sequence[Any]) -> dict[str, Any]:
+    """Return compact, JSON-safe audit arrays for IK motion projection."""
+
+    raw_counts = np.asarray(
+        [
+            len(getattr(waypoint, "raw_joint_velocity_violations", ()))
+            for waypoint in waypoints
+        ],
+        dtype=np.int32,
+    )
+    velocity_flags = np.asarray(
+        [
+            bool(getattr(waypoint, "velocity_projection_applied", False))
+            for waypoint in waypoints
+        ],
+        dtype=bool,
+    )
+    motion_flags = np.asarray(
+        [
+            bool(getattr(waypoint, "motion_projection_applied", False))
+            for waypoint in waypoints
+        ],
+        dtype=bool,
+    )
+    projected_dof_counts = np.asarray(
+        [
+            len(getattr(waypoint, "projected_joint_dof_indices", ()))
+            for waypoint in waypoints
+        ],
+        dtype=np.int32,
+    )
+    projection_diagnostic_counts = np.asarray(
+        [
+            len(getattr(waypoint, "motion_projection_diagnostics", ()))
+            for waypoint in waypoints
+        ],
+        dtype=np.int32,
+    )
+    max_abs_q_correction = np.asarray(
+        [
+            max(
+                (
+                    abs(float(getattr(item, "q_correction_rad")))
+                    for item in getattr(
+                        waypoint, "motion_projection_diagnostics", ()
+                    )
+                ),
+                default=0.0,
+            )
+            for waypoint in waypoints
+        ],
+        dtype=float,
+    )
+    reason_names = (
+        "position_limit",
+        "velocity_limit",
+        "acceleration_limit",
+        "jerk_limit",
+        "float32_quantization",
+        "combined_motion_interval",
+    )
+    reason_counts = {
+        reason: int(
+            sum(
+                reason in getattr(item, "trigger_reasons", ())
+                for waypoint in waypoints
+                for item in getattr(
+                    waypoint, "motion_projection_diagnostics", ()
+                )
+            )
+        )
+        for reason in reason_names
+    }
+    return {
+        "raw_joint_velocity_violation_count": raw_counts,
+        "velocity_projection_flags": velocity_flags,
+        "motion_projection_flags": motion_flags,
+        "projected_joint_dof_count": projected_dof_counts,
+        "projection_diagnostic_count": projection_diagnostic_counts,
+        "max_abs_q_correction_rad": max_abs_q_correction,
+        "velocity_projection_frame_count": int(np.count_nonzero(velocity_flags)),
+        "motion_projection_frame_count": int(np.count_nonzero(motion_flags)),
+        "raw_joint_velocity_violation_total": int(np.sum(raw_counts)),
+        "max_abs_q_correction_rad_overall": (
+            float(np.max(max_abs_q_correction))
+            if max_abs_q_correction.size
+            else 0.0
+        ),
+        "trigger_reason_counts": reason_counts,
+    }
+
+
 def _finite_or_none(value: Any) -> float | None:
     try:
         result = float(value)
@@ -874,6 +1070,30 @@ def _rollout_rows(
                     "joint_limit_violations": [
                         _joint_violation_row(item) for item in joint_violations
                     ],
+                    "velocity_projection_applied": bool(
+                        getattr(waypoint, "velocity_projection_applied", False)
+                    ),
+                    "raw_joint_velocity_violations": [
+                        _joint_velocity_violation_row(item)
+                        for item in getattr(
+                            waypoint, "raw_joint_velocity_violations", ()
+                        )
+                    ],
+                    "motion_projection_applied": bool(
+                        getattr(waypoint, "motion_projection_applied", False)
+                    ),
+                    "projected_joint_dof_indices": [
+                        int(index)
+                        for index in getattr(
+                            waypoint, "projected_joint_dof_indices", ()
+                        )
+                    ],
+                    "motion_projection_diagnostics": [
+                        _motion_projection_diagnostic_row(item)
+                        for item in getattr(
+                            waypoint, "motion_projection_diagnostics", ()
+                        )
+                    ],
                 },
             }
         )
@@ -915,7 +1135,7 @@ def run_kinematic(
     backend_factory: BackendFactory | None = None,
     collision_factory: CollisionFactory | None = None,
 ) -> RunOutcome:
-    """Execute and persist one deterministic five-phase kinematic rollout."""
+    """Execute and persist one deterministic six-phase kinematic rollout."""
 
     observed_urdf_sha256 = _verify_asset_hashes(config)
     _configure_deterministic_runtime(config)
@@ -1219,6 +1439,11 @@ def run_kinematic(
         },
     )
     joint_lower, joint_upper = _arm_joint_limits(config)
+    joint_velocity_limits = _arm_joint_velocity_limits(config)
+    initial_arm_joint_q = np.asarray(
+        config.get("assets.robot.default_joint_positions"), dtype=float
+    )
+    ik_motion = _ik_motion_diagnostics(waypoints)
     try:
         metrics = compute_metrics(
             phase_names=plan.phase_names,
@@ -1236,6 +1461,9 @@ def run_kinematic(
             joint_limit_tolerance_rad=float(
                 config.get("ik.joint_limit_tolerance_rad")
             ),
+            sample_dt_s=float(config.get("simulation.dt")),
+            initial_joint_q=initial_arm_joint_q,
+            joint_velocity_limits_rad_s=joint_velocity_limits,
         )
     except MetricsInputError as exc:
         raise PipelineError(
@@ -1253,12 +1481,43 @@ def run_kinematic(
         "run_status": run_status,
         "seed": int(config.get("seed")),
         "selected_grasp_candidate": selected.to_dict(),
+        "ik_motion_projection": {
+            "velocity_projection_frame_count": ik_motion[
+                "velocity_projection_frame_count"
+            ],
+            "motion_projection_frame_count": ik_motion[
+                "motion_projection_frame_count"
+            ],
+            "raw_joint_velocity_violation_total": ik_motion[
+                "raw_joint_velocity_violation_total"
+            ],
+            "max_abs_q_correction_rad": ik_motion[
+                "max_abs_q_correction_rad_overall"
+            ],
+            "trigger_reason_counts": ik_motion["trigger_reason_counts"],
+        },
     }
     arrays = {
         **plan.as_arrays(),
         "arm_joint_q": arm_joint_q,
         "joint_lower": joint_lower,
         "joint_upper": joint_upper,
+        "joint_velocity_limits_rad_s": joint_velocity_limits,
+        "initial_arm_joint_q": initial_arm_joint_q,
+        "ik_raw_joint_velocity_violation_count": ik_motion[
+            "raw_joint_velocity_violation_count"
+        ],
+        "ik_velocity_projection_flags": ik_motion["velocity_projection_flags"],
+        "ik_motion_projection_flags": ik_motion["motion_projection_flags"],
+        "ik_projected_joint_dof_count": ik_motion[
+            "projected_joint_dof_count"
+        ],
+        "ik_motion_projection_diagnostic_count": ik_motion[
+            "projection_diagnostic_count"
+        ],
+        "ik_motion_projection_max_abs_q_correction_rad": ik_motion[
+            "max_abs_q_correction_rad"
+        ],
         "achieved_gripper_world": achieved,
         "ik_success_flags": ik_success,
         "collision_flags": collision_flags,
@@ -1370,18 +1629,22 @@ def main(argv: list[str] | None = None) -> int:
                     },
                 ) from exc
             outcome = run_physics_assisted(config, output_dir=destination)
-        print(
-            json.dumps(
-                {
-                    "success": bool(outcome.metrics["success"]),
-                    "mode": args.mode,
-                    "output_dir": str(outcome.output_dir),
-                    "exit_code": outcome.exit_code,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
+        summary = json.dumps(
+            {
+                "success": bool(outcome.metrics["success"]),
+                "mode": args.mode,
+                "output_dir": str(outcome.output_dir),
+                "exit_code": outcome.exit_code,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
         )
+        try:
+            print(summary)
+        except BrokenPipeError:
+            # The completed artifact set is authoritative. Losing a detached
+            # caller's stdout must not overwrite it with a false CLI failure.
+            return int(outcome.exit_code)
         return int(outcome.exit_code)
     except PipelineError as exc:
         failure = exc.to_dict()

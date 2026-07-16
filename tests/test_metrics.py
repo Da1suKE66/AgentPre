@@ -56,9 +56,17 @@ def common_inputs(frame_count: int) -> dict:
 class MetricsTests(unittest.TestCase):
     def test_perfect_rollout_passes_all_configured_gates(self) -> None:
         phase_names = np.asarray(
-            ["pregrasp", "approach", "close", "actuate", "actuate", "retreat"]
+            [
+                "pregrasp",
+                "approach",
+                "close",
+                "actuate",
+                "actuate",
+                "release",
+                "retreat",
+            ]
         )
-        door_angle = np.asarray([0.0, 0.0, 0.0, 0.5, 1.0, 1.0])
+        door_angle = np.asarray([0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0])
         handle_world = np.stack(
             [pose((0.1 * index, 0.0, 0.5), math.degrees(angle)) for index, angle in enumerate(door_angle)]
         )
@@ -126,9 +134,13 @@ class MetricsTests(unittest.TestCase):
         self.assertFalse(metrics["gates"]["collision_frame_ratio"]["passed"])
         self.assertFalse(metrics["gates"]["final_door_angle_error_deg"]["passed"])
 
-    def test_grasp_drift_uses_only_close_and_actuate(self) -> None:
-        phase_names = np.asarray(["pregrasp", "close", "actuate", "retreat"])
-        handle_world = np.stack([pose(), pose(), pose((0.2, 0.1, 0.0), 30.0), pose()])
+    def test_grasp_drift_uses_close_actuate_and_release_only(self) -> None:
+        phase_names = np.asarray(
+            ["pregrasp", "close", "actuate", "release", "retreat"]
+        )
+        handle_world = np.stack(
+            [pose(), pose(), pose((0.2, 0.1, 0.0), 30.0), pose(), pose()]
+        )
         nominal_relative = pose((0.1, 0.0, 0.0), 0.0)
         target = np.stack(
             [compose_transforms(handle, nominal_relative) for handle in handle_world]
@@ -138,18 +150,21 @@ class MetricsTests(unittest.TestCase):
         achieved[2] = compose_transforms(
             handle_world[2], pose((0.12, 0.0, 0.0), 5.0)
         )
-        achieved[3] = pose((-5.0, 0.0, 0.0), -90.0)  # excluded from grasp drift
+        achieved[3] = compose_transforms(
+            handle_world[3], pose((0.13, 0.0, 0.0), 6.0)
+        )
+        achieved[4] = pose((-5.0, 0.0, 0.0), -90.0)  # excluded from grasp drift
         metrics = compute_metrics(
             phase_names=phase_names,
-            door_angle_rad=np.asarray([0.0, 0.0, 1.0, 1.0]),
+            door_angle_rad=np.asarray([0.0, 0.0, 1.0, 1.0, 1.0]),
             handle_world=handle_world,
             target_gripper_world=target,
             achieved_gripper_world=achieved,
-            joint_q=np.zeros((4, 1)),
+            joint_q=np.zeros((5, 1)),
             joint_lower=np.asarray([-1.0]),
             joint_upper=np.asarray([1.0]),
-            collision_flags=np.zeros(4, dtype=bool),
-            ik_success_flags=np.ones(4, dtype=bool),
+            collision_flags=np.zeros(5, dtype=bool),
+            ik_success_flags=np.ones(5, dtype=bool),
             target_door_angle_rad=1.0,
             thresholds=thresholds(
                 position_error_m=10.0,
@@ -158,10 +173,10 @@ class MetricsTests(unittest.TestCase):
                 grasp_orientation_drift_deg=4.0,
             ),
         )
-        self.assertEqual(metrics["grasp_drift_phase_frame_count"], 2)
-        self.assertEqual(metrics["grasp_drift_valid_frame_count"], 2)
-        self.assertAlmostEqual(metrics["max_handle_gripper_position_drift_m"], 0.02)
-        self.assertAlmostEqual(metrics["max_handle_gripper_orientation_drift_deg"], 5.0)
+        self.assertEqual(metrics["grasp_drift_phase_frame_count"], 3)
+        self.assertEqual(metrics["grasp_drift_valid_frame_count"], 3)
+        self.assertAlmostEqual(metrics["max_handle_gripper_position_drift_m"], 0.03)
+        self.assertAlmostEqual(metrics["max_handle_gripper_orientation_drift_deg"], 6.0)
         self.assertFalse(metrics["gates"]["max_handle_gripper_position_drift_m"]["passed"])
         self.assertFalse(metrics["gates"]["max_handle_gripper_orientation_drift_deg"]["passed"])
 
@@ -235,6 +250,301 @@ class MetricsTests(unittest.TestCase):
         with self.assertRaises(MetricsInputError) as raised:
             compute_metrics(**data)
         self.assertEqual(raised.exception.code, "JOINT_LIMIT_TOLERANCE_INVALID")
+
+    def test_joint_motion_metrics_and_configured_gates(self) -> None:
+        data = common_inputs(4)
+        data["joint_q"] = np.asarray(
+            [
+                [0.0, 0.0],
+                [1.0, -2.0],
+                [4.0, -4.0],
+                [9.0, -6.0],
+            ]
+        )
+        data["joint_lower"] = np.asarray([-10.0, -10.0])
+        data["joint_upper"] = np.asarray([10.0, 10.0])
+        data["sample_dt_s"] = 1.0
+        data["initial_joint_q"] = np.asarray([0.0, 0.0])
+        data["joint_velocity_limits_rad_s"] = np.asarray([2.5, 1.0])
+        data["thresholds"] = thresholds(
+            max_joint_velocity_rad_s=4.0,
+            max_joint_velocity_limit_ratio=1.0,
+            max_joint_acceleration_rad_s2=2.0,
+            max_joint_jerk_rad_s3=2.1,
+        )
+        metrics = compute_metrics(**data)
+
+        self.assertEqual(metrics["trajectory_sample_dt_s"], 1.0)
+        self.assertEqual(metrics["max_joint_step_rad"], 5.0)
+        self.assertEqual(metrics["per_joint_max_step_rad"], [5.0, 2.0])
+        self.assertEqual(metrics["max_joint_step_frame_index"], 3)
+        self.assertEqual(metrics["max_joint_step_joint_index"], 0)
+        self.assertEqual(metrics["max_joint_velocity_rad_s"], 5.0)
+        self.assertEqual(metrics["per_joint_max_velocity_rad_s"], [5.0, 2.0])
+        self.assertEqual(metrics["max_joint_velocity_frame_index"], 3)
+        self.assertEqual(metrics["max_joint_velocity_joint_index"], 0)
+        self.assertEqual(metrics["max_joint_velocity_limit_ratio"], 2.0)
+        self.assertEqual(metrics["per_joint_max_velocity_limit_ratio"], [2.0, 2.0])
+        self.assertEqual(metrics["max_joint_velocity_limit_ratio_frame_index"], 1)
+        self.assertEqual(metrics["max_joint_velocity_limit_ratio_joint_index"], 1)
+        self.assertEqual(metrics["max_joint_acceleration_rad_s2"], 2.0)
+        self.assertEqual(metrics["per_joint_max_acceleration_rad_s2"], [2.0, 2.0])
+        self.assertEqual(metrics["max_joint_acceleration_frame_index"], 1)
+        self.assertEqual(metrics["max_joint_jerk_rad_s3"], 2.0)
+        self.assertEqual(metrics["per_joint_max_jerk_rad_s3"], [1.0, 2.0])
+        self.assertEqual(metrics["joint_velocity_sample_count"], 4)
+        self.assertEqual(metrics["joint_acceleration_sample_count"], 4)
+        self.assertEqual(metrics["joint_jerk_sample_count"], 4)
+        self.assertFalse(metrics["gates"]["max_joint_velocity_rad_s"]["passed"])
+        self.assertFalse(
+            metrics["gates"]["max_joint_velocity_limit_ratio"]["passed"]
+        )
+        self.assertTrue(
+            metrics["gates"]["max_joint_acceleration_rad_s2"]["passed"]
+        )
+        self.assertTrue(metrics["gates"]["max_joint_jerk_rad_s3"]["passed"])
+        self.assertFalse(metrics["success"])
+        json.dumps(metrics, allow_nan=False)
+
+    def test_joint_velocity_gate_catches_one_frame_branch_jump(self) -> None:
+        data = common_inputs(5)
+        data["joint_q"] = np.zeros((5, 2))
+        data["joint_q"][3:, 0] = 1.416
+        data["joint_lower"] = np.asarray([-2.0, -2.0])
+        data["joint_upper"] = np.asarray([2.0, 2.0])
+        data["sample_dt_s"] = 1.0 / 60.0
+        data["initial_joint_q"] = np.zeros(2)
+        data["joint_velocity_limits_rad_s"] = np.asarray([2.61, 2.61])
+        data["thresholds"] = thresholds(max_joint_velocity_limit_ratio=1.0)
+        metrics = compute_metrics(**data)
+
+        self.assertAlmostEqual(metrics["max_joint_velocity_rad_s"], 84.96)
+        self.assertEqual(metrics["max_joint_velocity_frame_index"], 3)
+        self.assertEqual(metrics["max_joint_velocity_joint_index"], 0)
+        self.assertAlmostEqual(
+            metrics["max_joint_velocity_limit_ratio"], 84.96 / 2.61
+        )
+        self.assertFalse(
+            metrics["gates"]["max_joint_velocity_limit_ratio"]["passed"]
+        )
+        self.assertFalse(metrics["success"])
+
+    def test_motion_thresholds_require_valid_sample_dt(self) -> None:
+        data = common_inputs(4)
+        data["thresholds"] = thresholds(max_joint_velocity_rad_s=1.0)
+        with self.assertRaises(MetricsInputError) as raised:
+            compute_metrics(**data)
+        self.assertEqual(raised.exception.code, "TRAJECTORY_DT_REQUIRED")
+
+        data["sample_dt_s"] = 0.0
+        data["initial_joint_q"] = np.zeros(2)
+        with self.assertRaises(MetricsInputError) as raised:
+            compute_metrics(**data)
+        self.assertEqual(raised.exception.code, "TRAJECTORY_DT_INVALID")
+
+        for field, value in (
+            ("max_joint_velocity_rad_s", 0.0),
+            ("max_joint_velocity_limit_ratio", 0.0),
+            ("max_joint_acceleration_rad_s2", -1.0),
+            ("max_joint_jerk_rad_s3", 0.0),
+        ):
+            with self.subTest(field=field), self.assertRaises(
+                MetricsInputError
+            ) as raised:
+                MetricThresholds.from_mapping(thresholds(**{field: value}))
+            self.assertEqual(raised.exception.code, "THRESHOLD_INVALID")
+
+    def test_initial_to_frame_zero_is_included_in_motion_differences(self) -> None:
+        data = common_inputs(3)
+        data["joint_q"] = np.zeros((3, 2))
+        data["initial_joint_q"] = np.asarray([-3.0, 0.0])
+        data["sample_dt_s"] = 1.0
+        data["thresholds"] = thresholds(max_joint_velocity_rad_s=2.0)
+        metrics = compute_metrics(**data)
+
+        self.assertEqual(metrics["max_joint_step_rad"], 3.0)
+        self.assertEqual(metrics["max_joint_step_frame_index"], 0)
+        self.assertEqual(metrics["max_joint_velocity_rad_s"], 3.0)
+        self.assertEqual(metrics["max_joint_velocity_frame_index"], 0)
+        self.assertEqual(metrics["joint_velocity_sample_count"], 3)
+        self.assertFalse(metrics["gates"]["max_joint_velocity_rad_s"]["passed"])
+
+    def test_stationary_initial_velocity_and_acceleration_gate_frame_zero(self) -> None:
+        data = common_inputs(3)
+        data["joint_q"] = np.asarray(
+            [
+                [0.0, 0.0],
+                [3.0, 0.0],
+                [6.0, 0.0],
+            ]
+        )
+        data["joint_lower"] = np.asarray([-10.0, -10.0])
+        data["joint_upper"] = np.asarray([10.0, 10.0])
+        data["initial_joint_q"] = np.asarray([-3.0, 0.0])
+        data["sample_dt_s"] = 1.0
+        data["thresholds"] = thresholds(
+            max_joint_acceleration_rad_s2=2.0,
+            max_joint_jerk_rad_s3=2.0,
+        )
+        metrics = compute_metrics(**data)
+
+        self.assertEqual(metrics["per_joint_max_velocity_rad_s"], [3.0, 0.0])
+        self.assertEqual(metrics["max_joint_acceleration_rad_s2"], 3.0)
+        self.assertEqual(metrics["max_joint_acceleration_frame_index"], 0)
+        self.assertEqual(metrics["max_joint_jerk_rad_s3"], 3.0)
+        self.assertEqual(metrics["max_joint_jerk_frame_index"], 0)
+        self.assertEqual(metrics["joint_velocity_sample_count"], 3)
+        self.assertEqual(metrics["joint_acceleration_sample_count"], 3)
+        self.assertEqual(metrics["joint_jerk_sample_count"], 3)
+        self.assertFalse(
+            metrics["gates"]["max_joint_acceleration_rad_s2"]["passed"]
+        )
+        self.assertFalse(metrics["gates"]["max_joint_jerk_rad_s3"]["passed"])
+        self.assertEqual(
+            metrics["gates"]["max_joint_acceleration_rad_s2"]["source"],
+            "finite_difference_of_joint_q",
+        )
+        self.assertEqual(
+            metrics["gates"]["max_joint_jerk_rad_s3"]["source"],
+            "finite_difference_of_joint_q",
+        )
+        self.assertTrue(
+            metrics["position_difference_acceleration_jerk_gates_enabled"]
+        )
+        self.assertEqual(
+            metrics["position_difference_acceleration_acceptance_role"],
+            "acceptance_gate",
+        )
+        self.assertEqual(
+            metrics["position_difference_jerk_acceptance_role"],
+            "acceptance_gate",
+        )
+        self.assertFalse(metrics["success"])
+
+    def test_position_difference_acceleration_and_jerk_can_be_diagnostic_only(
+        self,
+    ) -> None:
+        data = common_inputs(3)
+        data["joint_q"] = np.asarray(
+            [
+                [0.0, 0.0],
+                [3.0, 0.0],
+                [6.0, 0.0],
+            ]
+        )
+        data["joint_lower"] = np.asarray([-10.0, -10.0])
+        data["joint_upper"] = np.asarray([10.0, 10.0])
+        data["initial_joint_q"] = np.asarray([-3.0, 0.0])
+        data["sample_dt_s"] = 1.0
+        data["thresholds"] = thresholds(
+            max_joint_velocity_rad_s=4.0,
+            max_joint_acceleration_rad_s2=2.0,
+            max_joint_jerk_rad_s3=2.0,
+        )
+        data[
+            "include_position_difference_acceleration_jerk_gates"
+        ] = False
+        metrics = compute_metrics(**data)
+
+        self.assertEqual(metrics["joint_motion_source"], "finite_difference_of_joint_q")
+        self.assertEqual(metrics["max_joint_acceleration_rad_s2"], 3.0)
+        self.assertEqual(metrics["max_joint_acceleration_frame_index"], 0)
+        self.assertEqual(metrics["max_joint_jerk_rad_s3"], 3.0)
+        self.assertEqual(metrics["max_joint_jerk_frame_index"], 0)
+        self.assertEqual(metrics["joint_acceleration_sample_count"], 3)
+        self.assertEqual(metrics["joint_jerk_sample_count"], 3)
+        self.assertEqual(
+            metrics["thresholds"]["max_joint_acceleration_rad_s2"], 2.0
+        )
+        self.assertEqual(metrics["thresholds"]["max_joint_jerk_rad_s3"], 2.0)
+        self.assertNotIn("max_joint_acceleration_rad_s2", metrics["gates"])
+        self.assertNotIn("max_joint_jerk_rad_s3", metrics["gates"])
+        self.assertIn("max_joint_velocity_rad_s", metrics["gates"])
+        self.assertTrue(metrics["gates"]["max_joint_velocity_rad_s"]["passed"])
+        self.assertFalse(
+            metrics["position_difference_acceleration_jerk_gates_enabled"]
+        )
+        self.assertEqual(
+            metrics["position_difference_acceleration_acceptance_role"],
+            "diagnostic_only",
+        )
+        self.assertEqual(
+            metrics["position_difference_jerk_acceptance_role"],
+            "diagnostic_only",
+        )
+        self.assertTrue(metrics["success"])
+
+        data["joint_upper"] = np.asarray([5.0, 10.0])
+        limited = compute_metrics(**data)
+        self.assertEqual(limited["joint_limit_violation_count"], 1)
+        self.assertFalse(limited["gates"]["joint_limit_violation_count"]["passed"])
+        self.assertFalse(
+            limited["gates"]["joint_limit_violation_frame_ratio"]["passed"]
+        )
+        self.assertNotIn("max_joint_acceleration_rad_s2", limited["gates"])
+        self.assertNotIn("max_joint_jerk_rad_s3", limited["gates"])
+        self.assertFalse(limited["success"])
+
+    def test_motion_gate_fails_when_any_expected_value_is_nonfinite(self) -> None:
+        cases = (
+            ("max_joint_velocity_rad_s", "joint_velocity"),
+            ("max_joint_velocity_limit_ratio", "joint_velocity_limit_ratio"),
+            ("max_joint_acceleration_rad_s2", "joint_acceleration"),
+            ("max_joint_jerk_rad_s3", "joint_jerk"),
+        )
+        for gate_name, validity_prefix in cases:
+            with self.subTest(gate=gate_name):
+                data = common_inputs(4)
+                data["joint_q"][2, 0] = np.nan
+                data["initial_joint_q"] = np.zeros(2)
+                data["joint_velocity_limits_rad_s"] = np.ones(2)
+                data["sample_dt_s"] = 1.0
+                data["thresholds"] = thresholds(
+                    require_nan_free=False,
+                    **{gate_name: 100.0},
+                )
+                metrics = compute_metrics(**data)
+
+                gate = metrics["gates"][gate_name]
+                self.assertEqual(metrics[gate_name], 0.0)
+                self.assertFalse(metrics[f"{validity_prefix}_all_finite"])
+                self.assertLess(
+                    metrics[f"{validity_prefix}_valid_value_count"],
+                    metrics[f"{validity_prefix}_expected_value_count"],
+                )
+                self.assertFalse(gate["all_expected_values_finite"])
+                self.assertFalse(gate["passed"])
+                self.assertFalse(metrics["success"])
+                json.dumps(metrics, allow_nan=False)
+
+    def test_motion_inputs_are_required_and_velocity_limits_validated(self) -> None:
+        data = common_inputs(3)
+        data["sample_dt_s"] = 1.0
+        data["thresholds"] = thresholds(max_joint_velocity_limit_ratio=1.0)
+        data["joint_velocity_limits_rad_s"] = np.ones(2)
+        with self.assertRaises(MetricsInputError) as raised:
+            compute_metrics(**data)
+        self.assertEqual(raised.exception.code, "INITIAL_JOINT_Q_REQUIRED")
+
+        data["initial_joint_q"] = np.zeros(2)
+        data.pop("joint_velocity_limits_rad_s")
+        with self.assertRaises(MetricsInputError) as raised:
+            compute_metrics(**data)
+        self.assertEqual(raised.exception.code, "JOINT_VELOCITY_LIMITS_REQUIRED")
+
+        data["joint_velocity_limits_rad_s"] = np.asarray([2.0, 0.0])
+        with self.assertRaises(MetricsInputError) as raised:
+            compute_metrics(**data)
+        self.assertEqual(raised.exception.code, "JOINT_VELOCITY_LIMITS_INVALID")
+
+    def test_old_callers_may_omit_motion_thresholds_and_sample_dt(self) -> None:
+        metrics = compute_metrics(**common_inputs(2))
+        self.assertNotIn("max_joint_velocity_rad_s", metrics["gates"])
+        self.assertIsNone(metrics["trajectory_sample_dt_s"])
+        self.assertFalse(metrics["initial_joint_q_provided"])
+        self.assertIsNone(metrics["max_joint_velocity_rad_s"])
+        self.assertEqual(metrics["per_joint_max_velocity_rad_s"], [None, None])
+        self.assertTrue(metrics["success"])
 
 
 if __name__ == "__main__":

@@ -14,10 +14,17 @@ from src.errors import FailureCode
 from src.newton_backend import (
     IKTrajectoryResult,
     IKWaypointResult,
+    JointMotionProjectionDiagnostic,
     PoseError,
     WaypointValidation,
 )
-from src.run import _finite_or_none, _numeric_json, main
+from src.run import (
+    _finite_or_none,
+    _ik_motion_diagnostics,
+    _motion_projection_diagnostic_row,
+    _numeric_json,
+    main,
+)
 from src.transforms import pose_matrix
 
 
@@ -117,7 +124,14 @@ class RunTests(unittest.TestCase):
         data["assets"]["robot"]["expected_urdf_sha256"] = FIXTURE_URDF_SHA256
         data["assets"]["robot"]["arm_joint_names"] = ["door_hinge"]
         data["assets"]["robot"]["default_joint_positions"] = [0.25]
-        for phase in ("pregrasp", "approach", "close", "actuate", "retreat"):
+        for phase in (
+            "pregrasp",
+            "approach",
+            "close",
+            "actuate",
+            "release",
+            "retreat",
+        ):
             data["task"]["phases"][phase]["samples"] = samples
         data["output"]["root"] = str(directory / "configured-output")
         path = directory / "config.json"
@@ -140,7 +154,63 @@ class RunTests(unittest.TestCase):
         )
         json.dumps(payload, allow_nan=False)
 
-    def test_cli_writes_complete_config_driven_five_phase_artifacts(self) -> None:
+    def test_nonzero_motion_projection_diagnostics_are_auditable(self) -> None:
+        first = JointMotionProjectionDiagnostic(
+            dof_index=1,
+            coord_index=1,
+            raw_candidate_q=-1.4,
+            projected_q=-0.04,
+            q_correction_rad=1.36,
+            raw_requested_velocity_rad_s=-84.0,
+            raw_requested_acceleration_rad_s2=-5000.0,
+            raw_requested_jerk_rad_s3=-300000.0,
+            projected_velocity_rad_s=-2.4,
+            projected_acceleration_rad_s2=-7.5,
+            projected_jerk_rad_s3=-450.0,
+            trigger_reasons=("velocity_limit", "acceleration_limit", "jerk_limit"),
+        )
+        second = JointMotionProjectionDiagnostic(
+            dof_index=4,
+            coord_index=4,
+            raw_candidate_q=0.2,
+            projected_q=0.19,
+            q_correction_rad=-0.01,
+            raw_requested_velocity_rad_s=1.0,
+            raw_requested_acceleration_rad_s2=8.0,
+            raw_requested_jerk_rad_s3=480.0,
+            projected_velocity_rad_s=0.9,
+            projected_acceleration_rad_s2=7.0,
+            projected_jerk_rad_s3=420.0,
+            trigger_reasons=("acceleration_limit", "jerk_limit"),
+        )
+        waypoint = SimpleNamespace(
+            velocity_projection_applied=True,
+            raw_joint_velocity_violations=(SimpleNamespace(),),
+            motion_projection_applied=True,
+            projected_joint_dof_indices=(1, 4),
+            motion_projection_diagnostics=(first, second),
+        )
+        diagnostics = _ik_motion_diagnostics([waypoint])
+        self.assertEqual(diagnostics["projected_joint_dof_count"].tolist(), [2])
+        self.assertEqual(
+            diagnostics["trigger_reason_counts"],
+            {
+                "position_limit": 0,
+                "velocity_limit": 1,
+                "acceleration_limit": 2,
+                "jerk_limit": 2,
+                "float32_quantization": 0,
+                "combined_motion_interval": 0,
+            },
+        )
+        self.assertAlmostEqual(
+            diagnostics["max_abs_q_correction_rad_overall"], 1.36
+        )
+        row = _motion_projection_diagnostic_row(first)
+        self.assertEqual(row["trigger_reasons"][0], "velocity_limit")
+        json.dumps(row, allow_nan=False)
+
+    def test_cli_writes_complete_config_driven_six_phase_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config_path = self._config(root, samples=2)
@@ -181,19 +251,40 @@ class RunTests(unittest.TestCase):
                 json.loads(line)
                 for line in (output_dir / "rollout.jsonl").read_text().splitlines()
             ]
-            self.assertEqual(len(rows), 10)
+            self.assertEqual(len(rows), 12)
             self.assertEqual(
-                [rows[index]["phase"] for index in range(0, 10, 2)],
-                ["pregrasp", "approach", "close", "actuate", "retreat"],
+                [rows[index]["phase"] for index in range(0, 12, 2)],
+                [
+                    "pregrasp",
+                    "approach",
+                    "close",
+                    "actuate",
+                    "release",
+                    "retreat",
+                ],
             )
             self.assertEqual(rows[0]["arm_joint_positions"].keys(), {"door_hinge"})
             self.assertTrue(all(row["ik"]["success"] for row in rows))
             self.assertTrue(all(not row["collision"] for row in rows))
+            self.assertTrue(
+                all(not row["ik"]["motion_projection_applied"] for row in rows)
+            )
+            self.assertTrue(
+                all(row["ik"]["raw_joint_velocity_violations"] == [] for row in rows)
+            )
 
             with np.load(output_dir / "trajectory.npz") as trajectory:
-                self.assertEqual(trajectory["arm_joint_q"].shape, (10, 1))
-                self.assertEqual(trajectory["target_gripper_world"].shape, (10, 4, 4))
-                self.assertEqual(trajectory["achieved_gripper_world"].shape, (10, 4, 4))
+                self.assertEqual(trajectory["arm_joint_q"].shape, (12, 1))
+                self.assertEqual(trajectory["target_gripper_world"].shape, (12, 4, 4))
+                self.assertEqual(trajectory["achieved_gripper_world"].shape, (12, 4, 4))
+                np.testing.assert_array_equal(
+                    trajectory["ik_motion_projection_flags"],
+                    np.zeros(12, dtype=bool),
+                )
+                np.testing.assert_array_equal(
+                    trajectory["ik_raw_joint_velocity_violation_count"],
+                    np.zeros(12, dtype=np.int32),
+                )
                 np.testing.assert_array_equal(
                     trajectory["phase_names"],
                     [
@@ -205,6 +296,8 @@ class RunTests(unittest.TestCase):
                         "close",
                         "actuate",
                         "actuate",
+                        "release",
+                        "release",
                         "retreat",
                         "retreat",
                     ],
@@ -213,11 +306,15 @@ class RunTests(unittest.TestCase):
             metrics = json.loads((output_dir / "metrics.json").read_text())
             self.assertTrue(metrics["success"])
             self.assertEqual(metrics["run_status"], "success")
-            self.assertEqual(metrics["frame_count"], 10)
+            self.assertEqual(metrics["frame_count"], 12)
             self.assertEqual(metrics["ik_waypoint_success_rate"], 1.0)
             self.assertEqual(metrics["collision_frame_ratio"], 0.0)
+            self.assertEqual(
+                metrics["ik_motion_projection"]["motion_projection_frame_count"],
+                0,
+            )
             self.assertEqual(metrics["collision_scope"], "cross_asset_robot_object")
-            self.assertEqual(FakeBackend.instances[0].solve_lengths, [1, 10])
+            self.assertEqual(FakeBackend.instances[0].solve_lengths, [1, 12])
             self.assertEqual(collision.candidate_ids, ["frame:handle_grasp"])
             self.assertEqual(collision.trajectory_calls, 1)
 
@@ -241,6 +338,41 @@ class RunTests(unittest.TestCase):
                 resolved["resolved_runtime"]["environment"]["CUDA_VISIBLE_DEVICES"],
                 "",
             )
+
+    def test_broken_stdout_does_not_overwrite_completed_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = self._config(root, samples=1)
+            output_dir = root / "broken-stdout"
+            collision = FakeCollisionEvaluator()
+            with (
+                mock.patch("src.run.NewtonFrankaIKBackend", FakeBackend),
+                mock.patch(
+                    "src.run._default_collision_factory",
+                    side_effect=lambda config, kinematics, backend: collision,
+                ),
+                mock.patch("builtins.print", side_effect=BrokenPipeError),
+            ):
+                exit_code = main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--mode",
+                        "kinematic",
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            self.assertEqual(exit_code, 0)
+            metrics = json.loads((output_dir / "metrics.json").read_text())
+            self.assertTrue(metrics["success"])
+            events = [
+                json.loads(line)["event"]
+                for line in (output_dir / "run.log").read_text().splitlines()
+            ]
+            self.assertEqual(events[-1], "run_completed")
+            self.assertNotIn("run_failed", events)
 
     def test_cli_fails_closed_before_backend_on_asset_hash_mismatch(self) -> None:
         for kind in ("object", "robot"):

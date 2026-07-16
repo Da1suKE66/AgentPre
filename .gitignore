@@ -6,6 +6,7 @@ __pycache__/
 .agentpre-cache/
 dist/
 build/
+*.egg-info/
 
 # Runtime data belongs under /cache/liluchen/agentpre on the remote host.
 outputs/*

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "base_config": "articraft_microwave_franka.json",
+  "workspace": {
+    "closed_handle_world_position_m": [0.58, -0.28, 0.5],
+    "object_orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+    "kinematic_object_offset_candidates_m": [
+      [0.0, 0.0, 0.0],
+      [-0.05, 0.0, 0.0],
+      [0.05, 0.0, 0.0],
+      [0.0, -0.05, 0.0],
+      [0.0, 0.05, 0.0],
+      [0.0, 0.0, -0.05],
+      [0.0, 0.0, 0.05]
+    ]
+  },
+  "semantics": {
+    "door_name_tokens": ["door", "lid", "panel"],
+    "hinge_name_tokens": ["hinge", "door"],
+    "handle_name_tokens": ["handle", "grip", "pull", "bar"],
+    "handle_exclude_tokens": ["mount", "hinge", "latch", "trim"],
+    "minimum_door_score": 5.0,
+    "minimum_handle_score": 4.0,
+    "ambiguity_margin": 1.0
+  },
+  "task": {
+    "preferred_goal_angle_deg": 65.0,
+    "joint_limit_margin_deg": 5.0,
+    "grasp_frame_name": "agent_auto_handle",
+    "recommended_gripper_width_m": 0.044
+  },
+  "search": {
+    "max_kinematic_attempts": 7,
+    "run_physics_only_after_kinematic_success": true
+  }
+}

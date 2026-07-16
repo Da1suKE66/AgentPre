@@ -13,8 +13,16 @@ from typing import Any
 from .errors import FailureCode, PipelineError
 
 
-PHASE_ORDER = ("pregrasp", "approach", "close", "actuate", "retreat")
+PHASE_ORDER = (
+    "pregrasp",
+    "approach",
+    "close",
+    "actuate",
+    "release",
+    "retreat",
+)
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_RUNTIME_DEVICE_PATTERN = re.compile(r"(?:cpu|cuda(?::[0-9]+)?)")
 
 
 def _lookup(data: dict[str, Any], dotted: str) -> Any:
@@ -288,14 +296,30 @@ def validate_config(data: dict[str, Any]) -> None:
             stage="config",
         )
 
+    phases = _lookup(data, "task.phases")
+    if not isinstance(phases, dict):
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "task.phases must be an object",
+            stage="config",
+            details={"field": "task.phases", "value": phases},
+        )
+    missing_phases = [phase for phase in PHASE_ORDER if phase not in phases]
+    extra_phases = [phase for phase in phases if phase not in PHASE_ORDER]
+    if missing_phases or extra_phases:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "task.phases must contain exactly the six configured phases",
+            stage="config",
+            details={
+                "field": "task.phases",
+                "missing": missing_phases,
+                "extra": extra_phases,
+                "phase_order": list(PHASE_ORDER),
+            },
+        )
     for phase in PHASE_ORDER:
-        count = _lookup(data, f"task.phases.{phase}.samples")
-        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
-            raise PipelineError(
-                FailureCode.CONFIG_INVALID,
-                f"task.phases.{phase}.samples must be a positive integer",
-                stage="config",
-            )
+        _positive_integer(data, f"task.phases.{phase}.samples")
 
     closed_angle_deg = _finite_number(data, "task.closed_angle_deg")
     goal_angle_deg = _finite_number(data, "task.goal_angle_deg")
@@ -311,13 +335,29 @@ def validate_config(data: dict[str, Any]) -> None:
     _positive_number(data, "simulation.dt")
     _positive_integer(data, "simulation.physics_substeps")
     _positive_integer(data, "simulation.solver_iterations")
+    release_blend_frames = _positive_integer(
+        data, "simulation.robot_control.grasp_release_blend_frames"
+    )
+    if release_blend_frames < 2:
+        raise PipelineError(
+            FailureCode.CONFIG_INVALID,
+            "simulation.robot_control.grasp_release_blend_frames must be at least 2",
+            stage="config",
+            details={
+                "field": "simulation.robot_control.grasp_release_blend_frames",
+                "value": release_blend_frames,
+            },
+        )
     for dotted in (
+        "simulation.robot_control.arm_joint_tracking_reserve_rad",
         "simulation.robot_control.arm_stiffness",
         "simulation.robot_control.arm_damping",
         "simulation.robot_control.finger_stiffness",
         "simulation.robot_control.finger_damping",
         "simulation.fixed_grasp_constraint.activation_position_tolerance_m",
         "simulation.fixed_grasp_constraint.activation_orientation_tolerance_deg",
+        "simulation.fixed_grasp_constraint.activation_linear_velocity_tolerance_m_s",
+        "simulation.fixed_grasp_constraint.activation_angular_velocity_tolerance_deg_s",
     ):
         _positive_number(data, dotted)
     door_stiffness = _positive_number(
@@ -346,7 +386,7 @@ def validate_config(data: dict[str, Any]) -> None:
     if runtime_threads != 1:
         raise PipelineError(
             FailureCode.CONFIG_INVALID,
-            "runtime.threads must be 1 for the deterministic CPU baseline",
+            "runtime.threads must be 1 for deterministic host-side preprocessing",
             stage="config",
             details={"field": "runtime.threads", "value": runtime_threads},
         )
@@ -354,6 +394,7 @@ def validate_config(data: dict[str, Any]) -> None:
     _positive_number(data, "ik.rotation_weight")
     _positive_number(data, "ik.joint_limit_weight")
     _positive_number(data, "ik.nominal_posture_weight", allow_zero=True)
+    _positive_number(data, "ik.continuity_weight")
     _positive_number(data, "ik.control_limit_margin_rad")
     _positive_number(data, "ik.step_size")
     _positive_number(data, "ik.lambda_initial")
@@ -409,6 +450,11 @@ def validate_config(data: dict[str, Any]) -> None:
         "thresholds.final_door_angle_deg",
         "thresholds.grasp_position_drift_m",
         "thresholds.grasp_orientation_drift_deg",
+        "thresholds.max_joint_velocity_limit_ratio",
+        "thresholds.max_joint_acceleration_rad_s2",
+        "thresholds.max_joint_jerk_rad_s3",
+        "thresholds.max_finger_acceleration_m_s2",
+        "thresholds.max_finger_jerk_m_s3",
     ):
         _positive_number(data, dotted)
     _positive_number(data, "thresholds.max_collision_frame_ratio", allow_zero=True)
@@ -541,12 +587,13 @@ def validate_config(data: dict[str, Any]) -> None:
                 stage="config",
             )
 
-    if str(_lookup(data, "runtime.device")).lower() != "cpu":
+    runtime_device = str(_lookup(data, "runtime.device")).lower()
+    if _RUNTIME_DEVICE_PATTERN.fullmatch(runtime_device) is None:
         raise PipelineError(
             FailureCode.CONFIG_INVALID,
-            "the checked-in first-stage config must use CPU to avoid the occupied GPU",
+            "runtime.device must be 'cpu', 'cuda', or 'cuda:<index>'",
             stage="config",
-            details={"field": "runtime.device"},
+            details={"field": "runtime.device", "value": runtime_device},
         )
 
 

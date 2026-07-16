@@ -178,11 +178,13 @@ if _NEWTON_IMPORT_ERROR is None:
 
 
     class JointNominalObjective(newton.ik.IKObjective):
-        """Analytic quadratic preference for a configured nominal posture.
+        """Analytic quadratic preference for a scalar-joint reference posture.
 
         ``cost_weight`` is a cost coefficient, so the residual and Jacobian
         use ``sqrt(cost_weight)``.  ``active_mask`` selects which scalar DoFs
-        participate without relying on robot-specific indices.
+        participate without relying on robot-specific indices.  The reference
+        can be replaced between solves with :meth:`set_reference_q`; the
+        original nominal-posture use remains the default behavior.
         """
 
         def __init__(
@@ -220,6 +222,51 @@ if _NEWTON_IMPORT_ERROR is None:
             self.nominal_q = None
             self.dof_to_coord = None
             self.active_mask = None
+
+        def set_reference_q(
+            self, reference_q: Sequence[float] | np.ndarray
+        ) -> None:
+            """Replace the posture reference without rebuilding the IK solver.
+
+            Newton owns objective instances for the solver lifetime.  Updating
+            the backing Warp array here lets a trajectory solver regularize
+            each waypoint against the previously accepted joint state instead
+            of a single fixed nominal posture.
+            """
+
+            reference = np.asarray(reference_q, dtype=np.float32)
+            if reference.shape != self._nominal_q_np.shape:
+                raise ValueError(
+                    "reference_q shape does not match the objective coordinate layout: "
+                    f"{reference.shape} != {self._nominal_q_np.shape}"
+                )
+            if not np.isfinite(reference).all():
+                raise ValueError("reference_q must contain only finite values")
+            self._nominal_q_np = reference.copy()
+            if self.nominal_q is not None:
+                self.nominal_q = wp.array(
+                    self._nominal_q_np, dtype=wp.float32, device=self.device
+                )
+
+        def set_active_mask(
+            self, active_mask: Sequence[float] | np.ndarray
+        ) -> None:
+            """Replace the residual/Jacobian mask without rebuilding the solver."""
+
+            mask = np.asarray(active_mask, dtype=np.float32)
+            if mask.shape != self._active_mask_np.shape or not np.isfinite(
+                mask
+            ).all():
+                raise ValueError(
+                    "active_mask must be finite and match the objective DoF layout"
+                )
+            if np.any((mask != 0.0) & (mask != 1.0)):
+                raise ValueError("active_mask entries must be exactly zero or one")
+            self._active_mask_np = mask.copy()
+            if self.active_mask is not None:
+                self.active_mask = wp.array(
+                    self._active_mask_np, dtype=wp.float32, device=self.device
+                )
 
         def residual_dim(self) -> int:
             return self.n_dofs
@@ -291,6 +338,10 @@ if _NEWTON_IMPORT_ERROR is None:
             )
 
 
+    class JointReferenceObjective(JointNominalObjective):
+        """Dynamic previous-state objective used to preserve IK branch continuity."""
+
+
 else:
 
     class JointNominalObjective:  # type: ignore[no-redef]
@@ -303,8 +354,13 @@ else:
             ) from _NEWTON_IMPORT_ERROR
 
 
+    class JointReferenceObjective(JointNominalObjective):  # type: ignore[no-redef]
+        """Import-safe placeholder used when Newton/Warp are unavailable."""
+
+
 __all__ = [
     "JointNominalObjective",
+    "JointReferenceObjective",
     "NewtonObjectiveUnavailableError",
     "ScalarJointLayoutError",
     "build_scalar_dof_to_coord_map",

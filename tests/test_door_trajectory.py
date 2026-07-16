@@ -65,12 +65,13 @@ class DoorTrajectoryTests(unittest.TestCase):
                 atol=1.0e-12,
             )
 
-    def test_five_phase_plan_and_fixed_grasp_transform(self) -> None:
+    def test_six_phase_plan_and_fixed_grasp_transform(self) -> None:
         phase_samples = {
             "pregrasp": 2,
             "approach": 3,
             "close": 2,
             "actuate": 5,
+            "release": 4,
             "retreat": 2,
         }
         handle_to_gripper = pose_matrix([0.0, -0.01, 0.0], [0.0, 1.0, 0.0, 0.0])
@@ -90,17 +91,120 @@ class DoorTrajectoryTests(unittest.TestCase):
             dt=1.0 / 60.0,
         )
         self.assertEqual(len(plan.time_s), sum(phase_samples.values()))
+        np.testing.assert_allclose(
+            plan.time_s,
+            (np.arange(sum(phase_samples.values()), dtype=float) + 1.0)
+            * (1.0 / 60.0),
+            rtol=0.0,
+            atol=0.0,
+        )
         self.assertEqual(set(plan.phase_names.tolist()), set(phase_samples))
         self.assertAlmostEqual(plan.door_angle_rad[-1], math.radians(65.0))
         self.assertTrue(np.isfinite(plan.target_gripper_world).all())
 
-        actuate = np.flatnonzero(plan.phase_names == "actuate")
-        for index in actuate:
+        grasped = np.flatnonzero(
+            np.isin(plan.phase_names, ["actuate", "release"])
+        )
+        for index in grasped:
             relative = compose_transforms(
                 invert_transform(plan.handle_world[index]),
                 plan.target_gripper_world[index],
             )
             np.testing.assert_allclose(relative, handle_to_gripper, atol=1.0e-8)
+
+        actuate = np.flatnonzero(plan.phase_names == "actuate")
+        release = np.flatnonzero(plan.phase_names == "release")
+        retreat = np.flatnonzero(plan.phase_names == "retreat")
+        np.testing.assert_allclose(
+            plan.door_angle_rad[release],
+            math.radians(65.0),
+            atol=0.0,
+        )
+        np.testing.assert_allclose(
+            plan.handle_world[release],
+            np.repeat(
+                plan.handle_world[actuate[-1]][None, :, :], len(release), axis=0
+            ),
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            plan.target_gripper_world[release],
+            np.repeat(
+                plan.target_gripper_world[actuate[-1]][None, :, :],
+                len(release),
+                axis=0,
+            ),
+            atol=1.0e-12,
+        )
+        linear = np.arange(1, len(release) + 1, dtype=float) / len(release)
+        progress = 10.0 * linear**3 - 15.0 * linear**4 + 6.0 * linear**5
+        np.testing.assert_allclose(
+            plan.gripper_width_m[release],
+            (1.0 - progress) * 0.028 + progress * 0.08,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(plan.gripper_width_m[retreat], 0.08, atol=0.0)
+        self.assertGreater(
+            np.linalg.norm(
+                plan.target_gripper_world[retreat[-1], :3, 3]
+                - plan.target_gripper_world[release[-1], :3, 3]
+            ),
+            0.09,
+        )
+
+    def test_phase_progress_is_monotonic_and_c2_smooth_at_endpoints(self) -> None:
+        sample_count = 40
+        goal_angle = math.radians(65.0)
+        plan = generate_task_plan(
+            kinematics=self.kinematics,
+            link_to_handle_frame=np.eye(4),
+            handle_approach_axis=np.asarray([0.0, 1.0, 0.0]),
+            handle_to_gripper=pose_matrix(
+                [0.0, -0.01, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+            ),
+            initial_gripper_world=pose_matrix(
+                [0.0, -0.4, 0.6],
+                [1.0, 0.0, 0.0, 0.0],
+            ),
+            closed_angle_rad=0.0,
+            goal_angle_rad=goal_angle,
+            phase_samples={phase: sample_count for phase in (
+                "pregrasp",
+                "approach",
+                "close",
+                "actuate",
+                "release",
+                "retreat",
+            )},
+            pregrasp_distance_m=0.12,
+            retreat_distance_m=0.1,
+            open_gripper_width_m=0.08,
+            closed_gripper_width_m=0.028,
+            dt=1.0 / 60.0,
+        )
+
+        actuate = np.flatnonzero(plan.phase_names == "actuate")
+        progress = plan.door_angle_rad[actuate] / goal_angle
+        linear = np.arange(1, sample_count + 1, dtype=float) / sample_count
+        expected = 10.0 * linear**3 - 15.0 * linear**4 + 6.0 * linear**5
+
+        np.testing.assert_allclose(progress, expected, atol=1.0e-12)
+        self.assertTrue(np.all(np.diff(progress) >= 0.0))
+        self.assertAlmostEqual(float(progress[-1]), 1.0)
+
+        # The previous phase supplies the omitted t=0 sample.  Including it
+        # here makes the finite differences exercise the actual phase join.
+        joined_progress = np.concatenate(([0.0], progress))
+        velocity = np.diff(joined_progress)
+        acceleration = np.diff(joined_progress, n=2)
+
+        peak_velocity = float(np.max(np.abs(velocity)))
+        peak_acceleration = float(np.max(np.abs(acceleration)))
+        self.assertLess(abs(float(velocity[0])), 0.01 * peak_velocity)
+        self.assertLess(abs(float(velocity[-1])), 0.01 * peak_velocity)
+        self.assertLess(abs(float(acceleration[0])), 0.25 * peak_acceleration)
+        self.assertLess(abs(float(acceleration[-1])), 0.25 * peak_acceleration)
 
 
 if __name__ == "__main__":
